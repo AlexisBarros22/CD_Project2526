@@ -7,17 +7,17 @@ class DataLoader:
         self.data = self._load_data()
         self.show_data()
 
-
-
     def _load_data(self):
-        # Implement your data loading logic here
-        # For example, you can read from a file or database
         try:
-            df = kagglehub.dataset_load(KaggleDatasetAdapter.PANDAS, "patrickzel/flight-delay-and-cancellation-dataset-2019-2023", "flights_sample_3m.csv")
+            path = kagglehub.dataset_download("patrickzel/flight-delay-and-cancellation-dataset-2019-2023")
+            file_path = f"{path}/flights_sample_3m.csv"
+            df = pd.read_csv(file_path, encoding='latin1')
             return df
+
         except Exception as e:
             print(f"Error loading data: {e}")
             return None
+
     def show_data(self):
         if self.data is not None:
             print("Data Preview:")
@@ -26,7 +26,3 @@ class DataLoader:
             print(self.data.describe())
         else:
             print("No data loaded")
-
-
-
-
