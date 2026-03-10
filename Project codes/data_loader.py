@@ -26,3 +26,4 @@ class DataLoader:
             print(self.data.describe())
         else:
             print("No data loaded")
+
