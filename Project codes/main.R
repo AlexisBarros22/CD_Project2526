@@ -162,16 +162,17 @@ DataPreprocess <- R6Class("DataPreprocess",
           self$data$FL_DATE <- as.Date(self$data$FL_DATE)
         }
 
-        # Extract Month and Day of Week (1-7, Monday-Sunday)
+        # Extract Year, Month, and Day of Week (1-7)
         self$data <- self$data %>%
           mutate(
+            FL_YEAR = as.numeric(format(FL_DATE, "%Y")),
             FL_MONTH = as.numeric(format(FL_DATE, "%m")),
             FL_DAY_OF_WEEK = as.numeric(format(FL_DATE, "%u"))
           )
 
         if (self$verbose) {
           cat("\nDate features extracted:\n")
-          print(head(self$data %>% select(FL_DATE, FL_MONTH, FL_DAY_OF_WEEK)))
+          print(head(self$data %>% select(FL_DATE, FL_YEAR, FL_MONTH, FL_DAY_OF_WEEK)))
         }
 
         self$data <- self$data %>% select(-FL_DATE)
@@ -1151,6 +1152,102 @@ DimReduction <- R6Class("DimReduction",
   )
 )
 
+HypothesisTesting <- R6Class("HypothesisTesting",
+  public = list(
+    data = NULL,
+    verbose = NULL,
+    alpha = 0.05,
+
+    initialize = function(data, verbose = TRUE) {
+      self$data <- as.data.frame(data)
+      self$verbose <- verbose
+    },
+
+    test_weekend_vs_weekday = function() {
+      if (self$verbose) cat("\n======================================================\n")
+      if (self$verbose) cat("   HYPOTHESIS TEST 1: Weekend vs. Weekday Delays\n")
+      if (self$verbose) cat("======================================================\n")
+
+      if (!all(c("ARR_DELAY", "IS_WEEKEND") %in% names(self$data))) {
+        cat("Error: Missing required columns.\n")
+        return(invisible(self))
+      }
+
+      # Run Welch's t-test
+      test_result <- t.test(ARR_DELAY ~ IS_WEEKEND, data = self$data)
+      print(test_result)
+
+      # --- Automated Interpretation ---
+      cat("\n--- Conclusion ---\n")
+      if (test_result$p.value < self$alpha) {
+        cat(sprintf("Result: REJECT the null hypothesis (p = %g < 0.05).\n", test_result$p.value))
+
+        # Extract means to see which is higher
+        mean_weekday <- test_result$estimate[1] # Group 0
+        mean_weekend <- test_result$estimate[2] # Group 1
+
+        if (mean_weekend > mean_weekday) {
+          cat("Conclusion: Weekends have significantly HIGHER arrival delays than weekdays.\n")
+        } else {
+          cat("Conclusion: Weekends have significantly LOWER arrival delays than weekdays.\n")
+        }
+      } else {
+        cat(sprintf("Result: FAIL TO REJECT the null hypothesis (p = %g >= 0.05).\n", test_result$p.value))
+        cat("Conclusion: There is no significant difference in delays between weekends and weekdays.\n")
+      }
+
+      invisible(self)
+    },
+
+    test_pandemic_impact = function() {
+      if (self$verbose) cat("\n======================================================\n")
+      if (self$verbose) cat("   HYPOTHESIS TEST 2: Pandemic Impact on Delays\n")
+      if (self$verbose) cat("======================================================\n")
+
+      if (!all(c("ARR_DELAY", "FL_YEAR") %in% names(self$data))) {
+        cat("Error: Missing required columns.\n")
+        return(invisible(self))
+      }
+
+      # Filter the data and label the eras
+      hyp_data <- self$data %>%
+        filter(FL_YEAR %in% c(2019, 2022, 2023)) %>%
+        mutate(ERA = ifelse(FL_YEAR == 2019, "Pre-Pandemic", "Post-Pandemic"))
+
+      # Extract the delay vectors
+      post_delays <- hyp_data %>% filter(ERA == "Post-Pandemic") %>% pull(ARR_DELAY)
+      pre_delays <- hyp_data %>% filter(ERA == "Pre-Pandemic") %>% pull(ARR_DELAY)
+
+      if (length(post_delays) == 0 || length(pre_delays) == 0) {
+        cat("Error: Not enough data for the specified years to run the test.\n")
+        return(invisible(self))
+      }
+
+      # Run Welch's one-sided t-test
+      test_result <- t.test(post_delays, pre_delays, alternative = "greater")
+      print(test_result)
+
+      # --- Automated Interpretation ---
+      if (test_result$p.value < self$alpha) {
+        cat(sprintf("Result: REJECT the null hypothesis (p = %g < 0.05).\n", test_result$p.value))
+        cat("Conclusion: Post-pandemic operations (2022-2023) suffered significantly more delays than pre-pandemic (2019) operations.\n")
+      } else {
+        cat(sprintf("Result: FAIL TO REJECT the null hypothesis (p = %g >= 0.05).\n", test_result$p.value))
+        cat("Conclusion: Post-pandemic delays are NOT significantly higher than pre-pandemic delays.\n")
+      }
+
+      invisible(self)
+    },
+
+    run_all_tests = function() {
+      self$test_weekend_vs_weekday()$
+        test_pandemic_impact()
+
+      invisible(self)
+    }
+  )
+)
+
 # ---------------------------------------------------------
 # Main Script
 # ---------------------------------------------------------
@@ -1171,6 +1268,7 @@ df_flights_clean <- processor$
   add_date_features()$
   convert_scheduled_times()$
   convert_to_season()$
+  is_weekend()$
   route()$
   avg_speed()$
   dep_hour()$
@@ -1197,11 +1295,13 @@ cat("\n--- Finished Exploratory Data Analysis ---\n")
 
 # 5. PCA and UMAP
 cat("\n--- Running PCA and UMAP ---\n")
-dim_red <- DimReduction$new(
-  data = splitter$data_train,
-  labels = splitter$labels_train,
-  verbose = TRUE
-)
+dim_red <- DimReduction$new(data = splitter$data_train, labels = splitter$labels_train, verbose = TRUE)
 dim_red$run_pca()$plot_pca()
 dim_red$run_umap()$plot_umap()
 cat("\n--- Finished PCA and UMAP ---\n")
+
+# 6. Hypotheses Testing
+cat("\n--- Running Hypothesis Testing ---\n")
+tester <- HypothesisTesting$new(data = df_flights_clean, verbose = TRUE)
+tester$run_all_tests()
+cat("\n--- Finished Hypothesis Testing ---\n")
