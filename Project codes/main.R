@@ -12,7 +12,7 @@ check_install_packages <- function(packages) {
 }
 
 # List of required packages
-required_packages <- c("methods", "ggplot2", "pracma", "patchwork", "gridExtra", "car", "coin", "stats", "utils", "datasets", "dplyr")  # Add more if needed
+required_packages <- c("methods", "ggplot2", "pracma", "patchwork", "gridExtra", "car", "coin", "stats", "utils", "datasets", "dplyr", "umap")  # Add more if needed
 
 # Check and install missing packages
 check_install_packages(required_packages)
@@ -27,6 +27,7 @@ library(stats)
 library(patchwork)
 library(datasets)
 library(methods)
+library(umap)
 
 DataLoader <- R6Class("DataLoader",
   public = list(
@@ -652,7 +653,7 @@ EDA <- R6Class("EDA",
     plot_boxplots = function(columns = NULL, clip_dict = NULL) {
       if (is.null(columns)) {
         columns <- c('CRS_DEP_TIME', 'CRS_ARR_TIME', 'CRS_ELAPSED_TIME', 'DISTANCE', 'ARR_DELAY',
-                     'SEASON', 'FL_DAY_OF_WEEK', 'FL_MONTH', 'AVG_SPEED', 'PEAK_MORNING', 'PEAK_EVENING')
+                     'SEASON', 'FL_DAY_OF_WEEK', 'FL_MONTH', 'AVG_SPEED')
       }
 
       if (is.null(clip_dict)) {
@@ -690,29 +691,32 @@ EDA <- R6Class("EDA",
         plots[[col]] <- p
       }
 
-      combined_plot <- wrap_plots(plots, ncol = 1)
+      combined_plot <- wrap_plots(plots, ncol = 3)
       print(combined_plot)
       invisible(self)
     },
 
     plot_correlation_heatmap = function() {
-      numeric_data <- self$data[, sapply(self$data, is.numeric), drop = FALSE]
+      target_cols <- c("AVG_SPEED", "DISTANCE", "CRS_ELAPSED_TIME", "ARR_DELAY")
+
+      cols_present <- intersect(target_cols, names(self$data))
+
+      numeric_data <- self$data[, cols_present, drop = FALSE]
 
       if (ncol(numeric_data) < 2) {
-        cat("Not enough numeric columns available for correlation heatmap.\n")
+        cat("Not enough of the specified columns are available for the correlation heatmap.\n")
         return(invisible(self))
       }
 
       corr_matrix <- cor(numeric_data, use = "pairwise.complete.obs")
 
-      # Convert correlation matrix to a flat format for ggplot2
       corr_df <- as.data.frame(as.table(corr_matrix))
 
       p <- ggplot(corr_df, aes(x = Var1, y = Var2, fill = Freq)) +
         geom_tile(color = "white") +
-        geom_text(aes(label = sprintf("%.2f", Freq)), size = 3) +
+        geom_text(aes(label = sprintf("%.2f", Freq)), size = 4) + # Bumped size slightly since there are fewer boxes
         scale_fill_gradient2(low = "#4575b4", mid = "white", high = "#d73027", midpoint = 0, limit = c(-1, 1), name = "Corr") +
-        labs(title = "Correlation Heatmap", x = "", y = "") +
+        labs(title = "Correlation Heatmap (Selected Features)", x = "", y = "") +
         self$base_theme +
         theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
 
@@ -993,6 +997,159 @@ EDA <- R6Class("EDA",
   )
 )
 
+DimReduction <- R6Class("DimReduction",
+  public = list(
+    data = NULL,
+    labels = NULL,
+    verbose = NULL,
+    base_theme = NULL,
+
+    pca_result = NULL,
+    umap_result = NULL,
+    umap_labels = NULL,
+
+    initialize = function(data, labels, verbose = TRUE) {
+      self$data <- as.data.frame(data)
+      self$labels <- labels
+      self$verbose <- verbose
+
+      self$base_theme <- theme_minimal(base_size = 14) +
+        theme(
+          plot.background = element_rect(fill = "white", color = NA),
+          panel.background = element_rect(fill = "#f8f9fa", color = "#333333"),
+          plot.title = element_text(face = "bold", hjust = 0.5)
+        )
+    },
+
+    run_pca = function() {
+      if (self$verbose) cat("\n--- Running PCA (Linear) ---\n")
+
+      target_cols <- c("AVG_SPEED", "DISTANCE", "CRS_ELAPSED_TIME", "ARR_DELAY")
+      cols_present <- intersect(target_cols, names(self$data))
+
+      if (length(cols_present) < 2) {
+        cat("Not enough target columns found to run PCA.\n")
+        return(invisible(self))
+      }
+
+      numeric_data <- self$data[, cols_present, drop = FALSE]
+      self$pca_result <- prcomp(numeric_data, center = TRUE, scale. = TRUE)
+
+      var_explained <- self$pca_result$sdev^2 / sum(self$pca_result$sdev^2)
+      if (self$verbose) {
+        cat(sprintf("PC1 explains %.2f%% of the variance.\n", var_explained[1] * 100))
+        cat(sprintf("PC2 explains %.2f%% of the variance.\n", var_explained[2] * 100))
+      }
+
+      invisible(self)
+    },
+
+    plot_pca = function(max_samples = 100000) {
+      if (is.null(self$pca_result)) {
+        cat("Please run_pca() first.\n")
+        return(invisible(self))
+      }
+
+      n_rows <- nrow(self$pca_result$x)
+
+      if (n_rows > max_samples) {
+        if (self$verbose) cat(sprintf("Plotting a random sample of %d points for visibility...\n", max_samples))
+        set.seed(42)
+        idx <- sample(seq_len(n_rows), max_samples)
+      } else {
+        idx <- seq_len(n_rows)
+      }
+
+      status_vec <- ifelse(self$labels[idx] < 15, "On-time",
+                           ifelse(self$labels[idx] <= 30, "Short delay", "Long delay"))
+
+      plot_df <- data.frame(
+        PC1 = self$pca_result$x[idx, 1],
+        PC2 = self$pca_result$x[idx, 2],
+        Status = factor(status_vec, levels = c("On-time", "Short delay", "Long delay"))
+      )
+
+      p <- ggplot(plot_df, aes(x = PC1, y = PC2, color = Status)) +
+        geom_point(alpha = 0.5, size = 1) +
+        scale_color_manual(values = c("On-time" = "#4575b4", "Short delay" = "#fdae61", "Long delay" = "#d73027")) +
+        labs(
+          title = sprintf("PCA: Flight Data Patterns (%dk Sample)", round(length(idx)/1000)),
+          x = "Principal Component 1",
+          y = "Principal Component 2"
+        ) +
+        self$base_theme +
+        theme(legend.position = "bottom", legend.title = element_blank())
+
+      print(p)
+      invisible(self)
+    },
+
+    run_umap = function(n_neighbors = 15, min_dist = 0.1, max_samples = 100000) {
+      if (self$verbose) cat("\n--- Running UMAP (Non-linear) ---\n")
+
+      target_cols <- c("AVG_SPEED", "DISTANCE", "CRS_ELAPSED_TIME", "ARR_DELAY")
+      cols_present <- intersect(target_cols, names(self$data))
+
+      if (length(cols_present) < 2) {
+        cat("Not enough target columns found to run UMAP.\n")
+        return(invisible(self))
+      }
+
+      if (nrow(self$data) > max_samples) {
+        if (self$verbose) cat(sprintf("Dataset too large! Downsampling to a random %d flights...\n", max_samples))
+        set.seed(42)
+        idx <- sample(seq_len(nrow(self$data)), max_samples)
+
+        numeric_data <- self$data[idx, cols_present, drop = FALSE]
+        self$umap_labels <- self$labels[idx]
+      } else {
+        numeric_data <- self$data[, cols_present, drop = FALSE]
+        self$umap_labels <- self$labels
+      }
+
+      custom_config <- umap.defaults
+      custom_config$n_neighbors <- n_neighbors
+      custom_config$min_dist <- min_dist
+      custom_config$init <- "random"
+
+      if (self$verbose) cat("Calculating UMAP (this will take 1-3 minutes)...\n")
+      self$umap_result <- umap(numeric_data, config = custom_config)
+
+      if (self$verbose) cat("UMAP complete!\n")
+      invisible(self)
+    },
+
+    plot_umap = function() {
+      if (is.null(self$umap_result)) {
+        cat("Please run_umap() first.\n")
+        return(invisible(self))
+      }
+
+      status_vec <- ifelse(self$umap_labels < 15, "On-time",
+                           ifelse(self$umap_labels <= 30, "Short delay", "Long delay"))
+
+      plot_df <- data.frame(
+        UMAP1 = self$umap_result$layout[, 1],
+        UMAP2 = self$umap_result$layout[, 2],
+        Status = factor(status_vec, levels = c("On-time", "Short delay", "Long delay"))
+      )
+
+      p <- ggplot(plot_df, aes(x = UMAP1, y = UMAP2, color = Status)) +
+        geom_point(alpha = 0.5, size = 1) +
+        scale_color_manual(values = c("On-time" = "#4575b4", "Short delay" = "#fdae61", "Long delay" = "#d73027")) +
+        labs(
+          title = "UMAP: Flight Data Patterns",
+          x = "UMAP Dimension 1",
+          y = "UMAP Dimension 2"
+        ) +
+        self$base_theme +
+        theme(legend.position = "bottom", legend.title = element_blank())
+
+      print(p)
+      invisible(self)
+    }
+  )
+)
 
 # ---------------------------------------------------------
 # Main Script
@@ -1024,13 +1181,27 @@ df_flights_clean <- processor$
   dest_state()$
   export_to_csv('Project Datasets/cleaned_flights.csv')$
   get_data()
+cat("\n--- Finished Data Preprocessing ---\n")
 
 # 3. Split data and map encodings
 cat("\n--- Starting Data Splitting & Encoding ---\n")
 splitter <- DataSplit$new(df_flights_clean)
 splitter$export_encoding_mappings('Project Datasets/encoding_mappings.csv')
+cat("\n--- Finished Data Splitting & Encoding ---\n")
 
 # 4. Run Exploratory Data Analysis
 cat("\n--- Running Exploratory Data Analysis ---\n")
 eda_instance <- EDA$new(df_flights_clean)
 eda_instance$plot_all_core()
+cat("\n--- Finished Exploratory Data Analysis ---\n")
+
+# 5. PCA and UMAP
+cat("\n--- Running PCA and UMAP ---\n")
+dim_red <- DimReduction$new(
+  data = splitter$data_train,
+  labels = splitter$labels_train,
+  verbose = TRUE
+)
+dim_red$run_pca()$plot_pca()
+dim_red$run_umap()$plot_umap()
+cat("\n--- Finished PCA and UMAP ---\n")
