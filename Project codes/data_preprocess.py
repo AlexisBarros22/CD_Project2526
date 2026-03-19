@@ -68,12 +68,15 @@ class DataPreprocess:
             if not pd.api.types.is_datetime64_any_dtype(self.data['FL_DATE']):
                 self.data['FL_DATE'] = pd.to_datetime(self.data['FL_DATE'], errors='coerce')
 
+            # Extract Year, Month, and Day of Week
+            self.data['FL_YEAR'] = self.data['FL_DATE'].dt.year
             self.data['FL_MONTH'] = self.data['FL_DATE'].dt.month
             self.data['FL_DAY_OF_WEEK'] = self.data['FL_DATE'].dt.isocalendar().day.astype(int)
 
             if self.verbose:
                 print("\nDate features extracted:")
-                print(self.data[['FL_DATE', 'FL_MONTH', 'FL_DAY_OF_WEEK']].head())
+                # Updated the print list to include FL_YEAR
+                print(self.data[['FL_DATE', 'FL_YEAR', 'FL_MONTH', 'FL_DAY_OF_WEEK']].head())
 
             self.data.drop(columns=['FL_DATE'], inplace=True, errors='ignore')
 
