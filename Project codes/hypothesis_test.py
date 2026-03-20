@@ -1,13 +1,64 @@
 import pandas as pd
 from scipy import stats
 
+
 class HypothesisTesting:
+    """
+    Hypothesis testing class for comparing flight delay groups.
+
+    This class runs statistical tests on arrival delays to check whether
+    selected groups differ significantly.
+
+    Parameters
+    ----------
+    data : pd.DataFrame or array-like
+        Input dataset.
+    verbose : bool, default=True
+        Whether to print detailed test output.
+
+    Attributes
+    ----------
+    data : pd.DataFrame
+        Input dataset stored as a DataFrame.
+    verbose : bool
+        Whether to print detailed results.
+    alpha : float
+        Significance level used for decisions.
+    """
+
     def __init__(self, data, verbose=True):
+        """
+        Initialize the hypothesis testing object.
+
+        Parameters
+        ----------
+        data : pd.DataFrame or array-like
+            Input dataset.
+        verbose : bool, default=True
+            Whether to print detailed output.
+        """
         self.data = pd.DataFrame(data)
         self.verbose = verbose
         self.alpha = 0.05
 
     def test_weekend_vs_weekday(self):
+        """
+        Test whether weekend and weekday arrival delays differ.
+
+        This method performs a Welch two-sample t-test comparing:
+        - weekday flights (`IS_WEEKEND == 0`)
+        - weekend flights (`IS_WEEKEND == 1`)
+
+        Hypotheses
+        ----------
+        H0: Mean weekend delay = Mean weekday delay
+        H1: Mean weekend delay != Mean weekday delay
+
+        Returns
+        -------
+        HypothesisTesting
+            The current object.
+        """
         if self.verbose:
             print("\n======================================================")
             print("   HYPOTHESIS TEST 1: Weekend vs. Weekday Delays")
@@ -17,10 +68,15 @@ class HypothesisTesting:
             print("Error: Missing required columns 'ARR_DELAY' or 'IS_WEEKEND'.")
             return self
 
-        weekday_delays = self.data[self.data['IS_WEEKEND'] == 0]['ARR_DELAY'].dropna()
-        weekend_delays = self.data[self.data['IS_WEEKEND'] == 1]['ARR_DELAY'].dropna()
+        weekday_delays = self.data[self.data["IS_WEEKEND"] == 0]["ARR_DELAY"].dropna()
+        weekend_delays = self.data[self.data["IS_WEEKEND"] == 1]["ARR_DELAY"].dropna()
 
-        stat, p_value = stats.ttest_ind(weekend_delays, weekday_delays, equal_var=False, alternative='two-sided')
+        stat, p_value = stats.ttest_ind(
+            weekend_delays,
+            weekday_delays,
+            equal_var=False,
+            alternative="two-sided"
+        )
 
         mean_weekday = weekday_delays.mean()
         mean_weekend = weekend_delays.mean()
@@ -36,9 +92,9 @@ class HypothesisTesting:
         if p_value < self.alpha:
             print(f"Result: REJECT the null hypothesis (p = {p_value:.4g} < {self.alpha}).")
             if mean_weekend > mean_weekday:
-                print("Conclusion: Weekends have significantly HIGHER arrival delays than weekdays.")
+                print("Conclusion: Weekends have significantly higher arrival delays than weekdays.")
             else:
-                print("Conclusion: Weekends have significantly LOWER arrival delays than weekdays.")
+                print("Conclusion: Weekends have significantly lower arrival delays than weekdays.")
         else:
             print(f"Result: FAIL TO REJECT the null hypothesis (p = {p_value:.4g} >= {self.alpha}).")
             print("Conclusion: There is no significant difference in delays between weekends and weekdays.")
@@ -46,6 +102,23 @@ class HypothesisTesting:
         return self
 
     def test_pandemic_impact(self):
+        """
+        Test whether post-pandemic delays are higher than pre-pandemic delays.
+
+        This method performs a one-sided Welch two-sample t-test comparing:
+        - pre-pandemic flights from 2019
+        - post-pandemic flights from 2022 and 2023
+
+        Hypotheses
+        ----------
+        H0: Mean post-pandemic delay <= Mean pre-pandemic delay
+        H1: Mean post-pandemic delay > Mean pre-pandemic delay
+
+        Returns
+        -------
+        HypothesisTesting
+            The current object.
+        """
         if self.verbose:
             print("\n======================================================")
             print("   HYPOTHESIS TEST 2: Pandemic Impact on Delays")
@@ -55,14 +128,19 @@ class HypothesisTesting:
             print("Error: Missing required columns 'ARR_DELAY' or 'FL_YEAR'.")
             return self
 
-        pre_delays = self.data[self.data['FL_YEAR'] == 2019]['ARR_DELAY'].dropna()
-        post_delays = self.data[self.data['FL_YEAR'].isin([2022, 2023])]['ARR_DELAY'].dropna()
+        pre_delays = self.data[self.data["FL_YEAR"] == 2019]["ARR_DELAY"].dropna()
+        post_delays = self.data[self.data["FL_YEAR"].isin([2022, 2023])]["ARR_DELAY"].dropna()
 
         if len(post_delays) == 0 or len(pre_delays) == 0:
             print("Error: Not enough data for the specified years to run the test.")
             return self
 
-        stat, p_value = stats.ttest_ind(post_delays, pre_delays, equal_var=False, alternative='greater')
+        stat, p_value = stats.ttest_ind(
+            post_delays,
+            pre_delays,
+            equal_var=False,
+            alternative="greater"
+        )
 
         mean_pre = pre_delays.mean()
         mean_post = post_delays.mean()
@@ -80,10 +158,18 @@ class HypothesisTesting:
             print("Conclusion: Post-pandemic operations (2022-2023) suffered significantly more delays than pre-pandemic (2019) operations.")
         else:
             print(f"Result: FAIL TO REJECT the null hypothesis (p = {p_value:.4g} >= {self.alpha}).")
-            print("Conclusion: Post-pandemic delays are NOT significantly higher than pre-pandemic delays.")
+            print("Conclusion: Post-pandemic delays are not significantly higher than pre-pandemic delays.")
 
         return self
 
     def run_all_tests(self):
+        """
+        Run all available hypothesis tests.
+
+        Returns
+        -------
+        HypothesisTesting
+            The current object.
+        """
         self.test_weekend_vs_weekday().test_pandemic_impact()
         return self
