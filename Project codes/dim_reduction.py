@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -26,7 +28,7 @@ class DimReduction:
     - PCA is best used with continuous / cyclical features.
     - UMAP can be used with a broader mixed feature set for visualization.
     - PCA is interpretable through explained variance and principal components,
-      while UMAP is mainly for visualization and exploration. :contentReference[oaicite:2]{index=2}
+      while UMAP is mainly for visualization and exploration.
 
     Parameters
     ----------
@@ -88,6 +90,35 @@ class DimReduction:
                 "figure.facecolor": "white"
             }
         )
+
+    def _sanitize_filename(self, name: str) -> str:
+        """
+        Convert a plot name into a safe filename.
+        """
+        safe = "".join(c if c.isalnum() or c in ("_", "-", " ") else "_" for c in name)
+        return safe.strip().replace(" ", "_").lower()
+
+    def _ensure_plot_folder(self, plot_type: str) -> Path:
+        """
+        Create and return a folder for a specific plot type inside ../Output files.
+        """
+        base_dir = (Path.cwd().parent / "Output files").resolve()
+        plot_dir = base_dir / plot_type
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        return plot_dir
+
+    def _export_current_plot(self, plot_type: str, plot_name: str, dpi: int = 300):
+        """
+        Export the currently active matplotlib figure as a PNG file.
+        """
+        folder = self._ensure_plot_folder(plot_type)
+        filename = f"{self._sanitize_filename(plot_name)}.png"
+        filepath = folder / filename
+
+        plt.savefig(filepath, dpi=dpi, bbox_inches="tight")
+
+        if self.verbose:
+            print(f"Saved plot to: {filepath}")
 
     def _get_feature_columns(self, feature_cols=None):
         """
@@ -170,7 +201,7 @@ class DimReduction:
         components explaining the maximum variance in the data. It is most
         appropriate when features are already standardized and when the goal
         is dimensionality reduction, structure inspection, or visualization
-        of global variance patterns. :contentReference[oaicite:3]{index=3}
+        of global variance patterns.
 
         Parameters
         ----------
@@ -206,7 +237,7 @@ class DimReduction:
 
         return self
 
-    def plot_pca(self, max_samples=100000, label_mode="delay_categorical"):
+    def plot_pca(self, max_samples=100000, label_mode="delay_categorical", export: bool = False):
         """
         Plot the first two PCA components.
 
@@ -226,6 +257,8 @@ class DimReduction:
             a random sample is used for readability.
         label_mode : str, default='delay_categorical'
             Coloring mode for the plot.
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -314,8 +347,11 @@ class DimReduction:
         plt.xlabel("Principal Component 1")
         plt.ylabel("Principal Component 2")
         plt.tight_layout()
-        plt.show()
 
+        if export:
+            self._export_current_plot("dimensionality_reduction", f"pca_{label_mode}")
+
+        plt.show()
         return self
 
     def run_umap(self, feature_cols=None, n_neighbors=15, min_dist=0.1, max_samples=100000):
@@ -325,7 +361,7 @@ class DimReduction:
         UMAP is a nonlinear dimensionality reduction method intended mainly for
         visualization and exploration. It tends to preserve local neighborhoods
         while also retaining more global structure than t-SNE, and it usually
-        scales better to larger datasets. :contentReference[oaicite:4]{index=4}
+        scales better to larger datasets.
 
         Parameters
         ----------
@@ -383,7 +419,7 @@ class DimReduction:
 
         return self
 
-    def plot_umap(self, label_mode="delay_categorical"):
+    def plot_umap(self, label_mode="delay_categorical", export: bool = False):
         """
         Plot the first two UMAP dimensions.
 
@@ -400,6 +436,8 @@ class DimReduction:
         ----------
         label_mode : str, default='delay_categorical'
             Coloring mode for the plot.
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -478,6 +516,46 @@ class DimReduction:
         plt.xlabel("UMAP Dimension 1")
         plt.ylabel("UMAP Dimension 2")
         plt.tight_layout()
+
+        if export:
+            self._export_current_plot("dimensionality_reduction", f"umap_{label_mode}")
+
         plt.show()
+        return self
+
+    def plot_all_core(self):
+        """
+        Run the core dimensionality-reduction plots for display only.
+
+        Returns
+        -------
+        DimReduction
+            The current object.
+        """
+        self.run_pca()
+        self.plot_pca()
+        self.run_umap()
+        self.plot_umap()
+
+        return self
+
+    def export_all_core(self):
+        """
+        Run and export the core dimensionality-reduction plots.
+
+        Returns
+        -------
+        DimReduction
+            The current object.
+        """
+        self.run_pca()
+        self.plot_pca(label_mode="delay_categorical", export=True)
+        self.plot_pca(label_mode="generic_categorical", export=True)
+        self.plot_pca(label_mode="continuous", export=True)
+
+        self.run_umap()
+        self.plot_umap(label_mode="delay_categorical", export=True)
+        self.plot_umap(label_mode="generic_categorical", export=True)
+        self.plot_umap(label_mode="continuous", export=True)
 
         return self

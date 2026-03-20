@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -38,6 +41,35 @@ class EDA:
         plt.rcParams["axes.facecolor"] = "#f8f9fa"
         plt.rcParams["axes.edgecolor"] = "#333333"
 
+    def _sanitize_filename(self, name: str) -> str:
+        """
+        Convert a plot name into a safe filename.
+        """
+        safe = "".join(c if c.isalnum() or c in ("_", "-", " ") else "_" for c in name)
+        return safe.strip().replace(" ", "_").lower()
+
+    def _ensure_plot_folder(self, plot_type: str) -> Path:
+        """
+        Create and return a folder for a specific plot type inside Output files.
+        """
+        base_dir = Path("..") / "Output files"
+        plot_dir = base_dir / plot_type
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        return plot_dir
+
+    def _export_current_plot(self, plot_type: str, plot_name: str, dpi: int = 300):
+        """
+        Export the currently active matplotlib figure as a PNG file.
+        """
+        folder = self._ensure_plot_folder(plot_type)
+        filename = f"{self._sanitize_filename(plot_name)}.png"
+        filepath = folder / filename
+
+        plt.savefig(filepath, dpi=dpi, bbox_inches="tight")
+
+        if self.verbose:
+            print(f"Saved plot to: {filepath}")
+
     def summary(self):
         """
         Print a dataset summary.
@@ -63,7 +95,7 @@ class EDA:
         print(self.data.describe(include="all"))
         return self
 
-    def plot_target_distribution(self, bins: int = 80, clip_range=(-60, 180)):
+    def plot_target_distribution(self, bins: int = 80, clip_range=(-60, 180), export: bool = False):
         """
         Plot the distribution of arrival delay.
 
@@ -73,6 +105,8 @@ class EDA:
             Number of bins.
         clip_range : tuple, default=(-60, 180)
             Range used to clip values for plotting.
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -98,11 +132,14 @@ class EDA:
         plt.xlabel("Arrival Delay (minutes)")
         plt.ylabel("Count")
         plt.tight_layout()
-        plt.show()
 
+        if export:
+            self._export_current_plot("distributions", "arrival_delay_distribution_clipped")
+
+        plt.show()
         return self
 
-    def plot_numeric_distributions(self, columns=None, bins: int = 40):
+    def plot_numeric_distributions(self, columns=None, bins: int = 40, export: bool = False):
         """
         Plot histograms for selected numeric columns.
 
@@ -112,6 +149,8 @@ class EDA:
             Columns to plot. If None, a default set is used.
         bins : int, default=40
             Number of bins.
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -164,11 +203,14 @@ class EDA:
             axes[j].axis("off")
 
         plt.tight_layout()
-        plt.show()
 
+        if export:
+            self._export_current_plot("distributions", "numeric_distributions")
+
+        plt.show()
         return self
 
-    def plot_boxplots(self, columns=None, clip_dict=None):
+    def plot_boxplots(self, columns=None, clip_dict=None, export: bool = False):
         """
         Plot boxplots for selected continuous columns.
 
@@ -178,6 +220,8 @@ class EDA:
             Columns to plot.
         clip_dict : dict or None, default=None
             Optional clipping ranges for columns.
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -226,13 +270,21 @@ class EDA:
             axes[i].set_xlabel(col)
 
         plt.tight_layout()
-        plt.show()
 
+        if export:
+            self._export_current_plot("boxplots", "continuous_boxplots")
+
+        plt.show()
         return self
 
-    def plot_cyclical_time_features(self):
+    def plot_cyclical_time_features(self, export: bool = False):
         """
         Plot encoded departure and arrival time features.
+
+        Parameters
+        ----------
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -280,11 +332,14 @@ class EDA:
             ax.add_patch(circle)
 
         plt.tight_layout()
-        plt.show()
 
+        if export:
+            self._export_current_plot("cyclical_features", "cyclical_time_features")
+
+        plt.show()
         return self
 
-    def plot_correlation_heatmap(self, figsize=(12, 8)):
+    def plot_correlation_heatmap(self, figsize=(12, 8), export: bool = False):
         """
         Plot a correlation heatmap for selected numeric features.
 
@@ -292,6 +347,8 @@ class EDA:
         ----------
         figsize : tuple, default=(12, 8)
             Figure size.
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -330,13 +387,21 @@ class EDA:
         )
         plt.title("Correlation Heatmap")
         plt.tight_layout()
-        plt.show()
 
+        if export:
+            self._export_current_plot("correlations", "correlation_heatmap")
+
+        plt.show()
         return self
 
-    def plot_delay_by_day_of_week(self):
+    def plot_delay_by_day_of_week(self, export: bool = False):
         """
         Plot mean arrival delay by day of week.
+
+        Parameters
+        ----------
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -368,13 +433,21 @@ class EDA:
         plt.xlabel("Day of Week")
         plt.ylabel("Mean Delay (minutes)")
         plt.tight_layout()
-        plt.show()
 
+        if export:
+            self._export_current_plot("barplots", "mean_arrival_delay_by_day_of_week")
+
+        plt.show()
         return self
 
-    def plot_delay_rate_by_day_of_week(self):
+    def plot_delay_rate_by_day_of_week(self, export: bool = False):
         """
         Plot the proportion of delayed flights by day of week.
+
+        Parameters
+        ----------
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -410,13 +483,21 @@ class EDA:
         plt.xlabel("Day of Week")
         plt.ylabel("Delay Rate (%)")
         plt.tight_layout()
-        plt.show()
 
+        if export:
+            self._export_current_plot("barplots", "delay_rate_by_day_of_week")
+
+        plt.show()
         return self
 
-    def plot_delay_by_month(self):
+    def plot_delay_by_month(self, export: bool = False):
         """
         Plot mean arrival delay by month.
+
+        Parameters
+        ----------
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -448,13 +529,21 @@ class EDA:
         plt.xlabel("Month")
         plt.ylabel("Mean Delay (minutes)")
         plt.tight_layout()
-        plt.show()
 
+        if export:
+            self._export_current_plot("lineplots", "mean_arrival_delay_by_month")
+
+        plt.show()
         return self
 
-    def plot_delay_vs_distance(self):
+    def plot_delay_vs_distance(self, export: bool = False):
         """
         Plot arrival delay against distance.
+
+        Parameters
+        ----------
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -481,13 +570,21 @@ class EDA:
         plt.xlabel("Distance (miles)")
         plt.ylabel("Arrival Delay (minutes, clipped)")
         plt.tight_layout()
-        plt.show()
 
+        if export:
+            self._export_current_plot("scatterplots", "arrival_delay_vs_distance")
+
+        plt.show()
         return self
 
-    def plot_delay_vs_elapsed_time(self):
+    def plot_delay_vs_elapsed_time(self, export: bool = False):
         """
         Plot arrival delay against scheduled elapsed time.
+
+        Parameters
+        ----------
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -514,13 +611,21 @@ class EDA:
         plt.xlabel("Scheduled Elapsed Time (minutes)")
         plt.ylabel("Arrival Delay (minutes, clipped)")
         plt.tight_layout()
-        plt.show()
 
+        if export:
+            self._export_current_plot("scatterplots", "arrival_delay_vs_elapsed_time")
+
+        plt.show()
         return self
 
-    def plot_delay_heatmap_month_day(self):
+    def plot_delay_heatmap_month_day(self, export: bool = False):
         """
         Plot mean arrival delay by month and day of week.
+
+        Parameters
+        ----------
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -545,11 +650,14 @@ class EDA:
         plt.xlabel("Month")
         plt.ylabel("Day of Week")
         plt.tight_layout()
-        plt.show()
 
+        if export:
+            self._export_current_plot("heatmaps", "mean_arrival_delay_month_day")
+
+        plt.show()
         return self
 
-    def plot_departure_time_month_heatmap(self, bins: int = 24):
+    def plot_departure_time_month_heatmap(self, bins: int = 24, export: bool = False):
         """
         Plot mean delay by departure time bin and month.
 
@@ -557,6 +665,8 @@ class EDA:
         ----------
         bins : int, default=24
             Number of bins.
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -595,11 +705,14 @@ class EDA:
         plt.xlabel("Month")
         plt.ylabel("Departure Time Bin")
         plt.tight_layout()
-        plt.show()
 
+        if export:
+            self._export_current_plot("heatmaps", "mean_delay_departure_time_month")
+
+        plt.show()
         return self
 
-    def plot_delay_by_departure_time_circle(self, bins: int = 24):
+    def plot_delay_by_departure_time_circle(self, bins: int = 24, export: bool = False):
         """
         Plot mean arrival delay over departure time bins on a polar chart.
 
@@ -607,6 +720,8 @@ class EDA:
         ----------
         bins : int, default=24
             Number of bins.
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -645,11 +760,14 @@ class EDA:
         ax.plot(theta, summary["ARR_DELAY"], marker="o")
         ax.fill(theta, summary["ARR_DELAY"], alpha=0.25)
         ax.set_title("Mean Arrival Delay by Scheduled Departure Time")
-        plt.show()
 
+        if export:
+            self._export_current_plot("polar_plots", "mean_arrival_delay_by_departure_time")
+
+        plt.show()
         return self
 
-    def plot_route_delay_rate(self, top_n: int = 15, min_flights: int = 3000):
+    def plot_route_delay_rate(self, top_n: int = 15, min_flights: int = 3000, export: bool = False):
         """
         Plot delay rate for busy routes.
 
@@ -659,6 +777,8 @@ class EDA:
             Number of routes to show.
         min_flights : int, default=3000
             Minimum number of flights required.
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -700,13 +820,21 @@ class EDA:
         plt.xlabel("Delay Rate (%)")
         plt.ylabel("Route")
         plt.tight_layout()
-        plt.show()
 
+        if export:
+            self._export_current_plot("barplots", "route_delay_rate_busy_routes")
+
+        plt.show()
         return self
 
-    def plot_delay_by_season_violin(self):
+    def plot_delay_by_season_violin(self, export: bool = False):
         """
         Plot arrival delay distribution by season.
+
+        Parameters
+        ----------
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -727,11 +855,14 @@ class EDA:
         plt.xlabel("Season")
         plt.ylabel("Arrival Delay (minutes, clipped)")
         plt.tight_layout()
-        plt.show()
 
+        if export:
+            self._export_current_plot("violin_plots", "arrival_delay_by_season")
+
+        plt.show()
         return self
 
-    def plot_origin_city_volume_vs_delay(self, min_flights: int = 2000):
+    def plot_origin_city_volume_vs_delay(self, min_flights: int = 2000, export: bool = False):
         """
         Plot flight volume against average delay for origin cities.
 
@@ -739,6 +870,8 @@ class EDA:
         ----------
         min_flights : int, default=2000
             Minimum number of flights required.
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -766,11 +899,14 @@ class EDA:
         plt.xlabel("Number of Flights")
         plt.ylabel("Average Arrival Delay")
         plt.tight_layout()
-        plt.show()
 
+        if export:
+            self._export_current_plot("scatterplots", "origin_city_volume_vs_average_delay")
+
+        plt.show()
         return self
 
-    def plot_top_airlines_by_average_delay(self, top_n: int = 15, min_flights: int = 5000):
+    def plot_top_airlines_by_average_delay(self, top_n: int = 15, min_flights: int = 5000, export: bool = False):
         """
         Plot airlines with the highest average delay.
 
@@ -780,6 +916,8 @@ class EDA:
             Number of airlines to show.
         min_flights : int, default=5000
             Minimum number of flights required.
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -815,11 +953,14 @@ class EDA:
         plt.xlabel("Average Arrival Delay (minutes)")
         plt.ylabel("DOT_CODE")
         plt.tight_layout()
-        plt.show()
 
+        if export:
+            self._export_current_plot("barplots", "top_airlines_by_average_delay")
+
+        plt.show()
         return self
 
-    def plot_top_origin_cities_by_average_delay(self, top_n: int = 15, min_flights: int = 2000):
+    def plot_top_origin_cities_by_average_delay(self, top_n: int = 15, min_flights: int = 2000, export: bool = False):
         """
         Plot origin cities with the highest average delay.
 
@@ -829,6 +970,8 @@ class EDA:
             Number of cities to show.
         min_flights : int, default=2000
             Minimum number of flights required.
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -862,11 +1005,14 @@ class EDA:
         plt.xlabel("Average Arrival Delay (minutes)")
         plt.ylabel("Origin City")
         plt.tight_layout()
-        plt.show()
 
+        if export:
+            self._export_current_plot("barplots", "top_origin_cities_by_average_delay")
+
+        plt.show()
         return self
 
-    def plot_top_dest_cities_by_average_delay(self, top_n: int = 15, min_flights: int = 2000):
+    def plot_top_dest_cities_by_average_delay(self, top_n: int = 15, min_flights: int = 2000, export: bool = False):
         """
         Plot destination cities with the highest average delay.
 
@@ -876,6 +1022,8 @@ class EDA:
             Number of cities to show.
         min_flights : int, default=2000
             Minimum number of flights required.
+        export : bool, default=False
+            Whether to export the plot as PNG.
 
         Returns
         -------
@@ -909,13 +1057,16 @@ class EDA:
         plt.xlabel("Average Arrival Delay (minutes)")
         plt.ylabel("Destination City")
         plt.tight_layout()
-        plt.show()
 
+        if export:
+            self._export_current_plot("barplots", "top_destination_cities_by_average_delay")
+
+        plt.show()
         return self
 
     def plot_all_core(self):
         """
-        Run a core set of EDA plots.
+        Run a core set of EDA plots for display only.
 
         Returns
         -------
@@ -942,5 +1093,36 @@ class EDA:
         self.plot_top_airlines_by_average_delay()
         self.plot_top_origin_cities_by_average_delay()
         self.plot_top_dest_cities_by_average_delay()
+
+        return self
+
+    def export_all_core(self):
+        """
+        Run and export the core EDA plots into PNG files inside Output files.
+
+        Returns
+        -------
+        EDA
+            The current object.
+        """
+        self.plot_target_distribution(export=True)
+        self.plot_numeric_distributions(export=True)
+        self.plot_boxplots(export=True)
+        self.plot_cyclical_time_features(export=True)
+        self.plot_correlation_heatmap(export=True)
+        self.plot_delay_by_day_of_week(export=True)
+        self.plot_delay_rate_by_day_of_week(export=True)
+        self.plot_delay_by_month(export=True)
+        self.plot_delay_vs_distance(export=True)
+        self.plot_delay_vs_elapsed_time(export=True)
+        self.plot_delay_heatmap_month_day(export=True)
+        self.plot_departure_time_month_heatmap(export=True)
+        self.plot_delay_by_departure_time_circle(export=True)
+        self.plot_route_delay_rate(export=True)
+        self.plot_delay_by_season_violin(export=True)
+        self.plot_origin_city_volume_vs_delay(export=True)
+        self.plot_top_airlines_by_average_delay(export=True)
+        self.plot_top_origin_cities_by_average_delay(export=True)
+        self.plot_top_dest_cities_by_average_delay(export=True)
 
         return self
