@@ -48,6 +48,60 @@ class EDA:
         safe = "".join(c if c.isalnum() or c in ("_", "-", " ") else "_" for c in name)
         return safe.strip().replace(" ", "_").lower()
 
+    def balance_by_arrival_delay(self, random_state: int = None):
+        """
+        Create a balanced sample of the dataset by selecting all non-zero arrival delays
+        and randomly sampling an equal number of zero arrival delays.
+        Updates self.data with the balanced dataframe.
+
+        Parameters
+        ----------
+        random_state : int, optional
+            Random seed for reproducibility.
+
+        Returns
+        -------
+        EDA
+            The current object for method chaining.
+        """
+        if "ARR_DELAY" not in self.data.columns:
+            print("ARR_DELAY column not found.")
+            return self
+
+        # Separate zero and non-zero delays
+        non_zero_delays = self.data[self.data["ARR_DELAY"] != 0]
+        zero_delays = self.data[self.data["ARR_DELAY"] == 0]
+
+        # Get the count of non-zero delays
+        n_non_zero = len(non_zero_delays)
+
+        if self.verbose:
+            print(f"Non-zero delays: {n_non_zero}")
+            print(f"Zero delays available: {len(zero_delays)}")
+
+        # Randomly sample equal number from zero delays
+        zero_delays_sampled = zero_delays.sample(
+            n=min(n_non_zero, len(zero_delays)),
+            random_state=random_state
+        )
+
+        # Concatenate and shuffle
+        balanced_df = pd.concat(
+            [non_zero_delays, zero_delays_sampled],
+            ignore_index=True
+        )
+        balanced_df = balanced_df.sample(frac=1, random_state=random_state).reset_index(drop=True)
+
+        # Update self.data with balanced data
+        self.data = balanced_df
+
+        if self.verbose:
+            print(f"Balanced dataset size: {len(self.data)}")
+            print(f"Zero delays in balanced set: {(self.data['ARR_DELAY'] == 0).sum()}")
+            print(f"Non-zero delays in balanced set: {(self.data['ARR_DELAY'] != 0).sum()}")
+
+        return self
+
     def _ensure_plot_folder(self, plot_type: str) -> Path:
         """
         Create and return a folder for a specific plot type inside Output files.
@@ -1073,6 +1127,7 @@ class EDA:
         EDA
             The current object.
         """
+        self.balance_by_arrival_delay()
         self.summary()
         self.plot_target_distribution()
         self.plot_numeric_distributions()
@@ -1105,6 +1160,7 @@ class EDA:
         EDA
             The current object.
         """
+        self.balance_by_arrival_delay()
         self.plot_target_distribution(export=True)
         self.plot_numeric_distributions(export=True)
         self.plot_boxplots(export=True)
