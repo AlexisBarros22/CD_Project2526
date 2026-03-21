@@ -7,7 +7,7 @@ The goal is to understand the factors influencing delays and prepare the data fo
 
 ## Project Structure
 - Project Codes (contains Python, R code and Jupyter Notebook)
-- Project Datasets (to be created, contains dataset and aditional csv's)
+- Project Datasets (to be created, contains dataset and additional csv's)
 - Project Plans (information related to the project at hand)
 - Project Reports (contains the projects reports)
 - README.md
