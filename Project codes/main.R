@@ -12,7 +12,7 @@ check_install_packages <- function(packages) {
 }
 
 # List of required packages
-required_packages <- c("methods", "ggplot2", "pracma", "patchwork", "gridExtra", "car", "coin", "stats", "utils", "datasets", "dplyr", "umap")  # Add more if needed
+required_packages <- c("methods", "ggplot2", "pracma", "patchwork", "gridExtra", "car", "coin", "stats", "utils", "datasets", "dplyr", "uwot")  # Add more if needed
 
 # Check and install missing packages
 check_install_packages(required_packages)
@@ -27,7 +27,7 @@ library(stats)
 library(patchwork)
 library(datasets)
 library(methods)
-library(umap)
+library(uwot)
 
 DataLoader <- R6Class("DataLoader",
   public = list(
@@ -181,7 +181,7 @@ DataPreprocess <- R6Class("DataPreprocess",
       invisible(self)
     },
 
-    convert_scheduled_times = function() {
+    convert_scheduled_times_cyclical = function() {
       time_cols <- c('CRS_DEP_TIME', 'CRS_ARR_TIME')
 
       for (col in time_cols) {
@@ -190,11 +190,23 @@ DataPreprocess <- R6Class("DataPreprocess",
 
           hours <- self$data[[col]] %/% 100
           minutes <- self$data[[col]] %% 100
-          self$data[[col]] <- (hours * 60) + minutes
+          total_minutes <- (hours * 60) + minutes
+
+          minutes_in_day <- 24 * 60
+
+          # Create cyclical features
+          sin_col <- paste0(col, "_sin")
+          cos_col <- paste0(col, "_cos")
+
+          self$data[[sin_col]] <- sin(2 * pi * total_minutes / minutes_in_day)
+          self$data[[cos_col]] <- cos(2 * pi * total_minutes / minutes_in_day)
+
+          # Drop the original column to match Python behavior
+          self$data <- self$data %>% select(-all_of(col))
 
           if (self$verbose) {
-            cat(sprintf("\nConverted %s to minutes since midnight:\n", col))
-            print(head(self$data[[col]]))
+            cat(sprintf("\nConverted %s to cyclical features:\n", col))
+            print(head(self$data %>% select(all_of(c(sin_col, cos_col)))))
           }
         }
       }
@@ -341,6 +353,27 @@ DataPreprocess <- R6Class("DataPreprocess",
       invisible(self)
     },
 
+    fix_negative_delays = function() {
+      cols_to_check <- c("ARR_DELAY")
+
+      for (col in cols_to_check) {
+        if (col %in% names(self$data)) {
+
+          negative_count <- sum(self$data[[col]] < 0, na.rm = TRUE)
+
+          if (negative_count > 0) {
+            if (self$verbose) {
+              cat(sprintf("\nFound %d negative values in '%s'. Setting them to 0.\n", negative_count, col))
+            }
+
+            self$data[[col]][self$data[[col]] < 0 & !is.na(self$data[[col]])] <- 0
+          }
+        }
+      }
+
+      invisible(self)
+    },
+
     export_to_csv = function(path) {
       write.csv(self$data, file = path, row.names = FALSE)
       if (self$verbose) {
@@ -372,7 +405,6 @@ DataSplit <- R6Class("DataSplit",
     categorical_cols = c('ORIGIN_CITY', 'DEST_CITY', 'ORIGIN_STATE', 'DEST_STATE', 'ROUTE'),
     normalize_columns = c('CRS_DEP_TIME', 'CRS_ARR_TIME', 'DISTANCE', 'CRS_ELAPSED_TIME', 'AVG_SPEED', 'DEP_HOUR', 'ARR_HOUR'),
 
-    # Placeholders for our custom encoders and scalers
     state_mapping = NULL,
     route_mapping = NULL,
     other_mappings = list(),
@@ -451,15 +483,16 @@ DataSplit <- R6Class("DataSplit",
 
   private = list(
     split_data = function() {
-      X <- self$data %>% select(-ARR_DELAY)
+      # Use base R subsetting here to avoid NSE issues inside R6
+      X <- self$data[, !(names(self$data) %in% c("ARR_DELAY")), drop = FALSE]
       y <- self$data$ARR_DELAY
 
-      # Set seed and create train indices to mimic train_test_split
       set.seed(self$random_state)
       n_rows <- nrow(X)
-      train_indices <- sample(seq_len(n_rows), size = floor((1 - self$test_size) * n_rows))
 
-      # Implicit copies are created here by standard R subsetting
+      # Using sample.int is slightly faster and safer than sample() for indices
+      train_indices <- sample.int(n_rows, size = floor((1 - self$test_size) * n_rows))
+
       self$data_train_eda <- X[train_indices, , drop = FALSE]
       self$data_test_eda  <- X[-train_indices, , drop = FALSE]
 
@@ -474,16 +507,12 @@ DataSplit <- R6Class("DataSplit",
       state_cols <- intersect(c('ORIGIN_STATE', 'DEST_STATE'), names(self$data_train))
 
       if (length(state_cols) > 0) {
-        # Combine unique values from both columns
-        all_states_vec <- c()
-        for (col in state_cols) all_states_vec <- c(all_states_vec, as.character(self$data_train[[col]]))
-        all_states <- sort(unique(all_states_vec))
+        # Faster way to get all unique states
+        all_states <- sort(unique(unlist(lapply(self$data_train[state_cols], as.character))))
 
-        # Create a named vector mapping (0-indexed to match Python)
         self$state_mapping <- setNames(seq_along(all_states) - 1, all_states)
 
         for (col in state_cols) {
-          # Map values. Unmapped/unseen values become NA, which we then replace with -1
           self$data_train[[col]] <- unname(self$state_mapping[as.character(self$data_train[[col]])])
           self$data_train[[col]][is.na(self$data_train[[col]])] <- -1
 
@@ -494,14 +523,17 @@ DataSplit <- R6Class("DataSplit",
 
       # ---------- 2) Symmetric encoding for route ----------
       if ('ROUTE' %in% names(self$data_train)) {
-        canonical_route <- function(route) {
-          parts <- strsplit(as.character(route), "_")[[1]]
-          if (length(parts) != 2) return(as.character(route))
-          return(paste(sort(parts), collapse = "_"))
+        # Vectorized string split and sort for massive speedup on 2.9M rows
+        canonical_route <- function(routes) {
+          # vapply is safer and faster than sapply here
+          vapply(strsplit(as.character(routes), "_"), function(x) {
+            if(length(x) != 2) return(paste(x, collapse="_"))
+            paste(sort(x), collapse="_")
+          }, FUN.VALUE = character(1))
         }
 
-        train_routes <- sapply(self$data_train$ROUTE, canonical_route, USE.NAMES = FALSE)
-        test_routes  <- sapply(self$data_test$ROUTE, canonical_route, USE.NAMES = FALSE)
+        train_routes <- canonical_route(self$data_train$ROUTE)
+        test_routes  <- canonical_route(self$data_test$ROUTE)
 
         unique_routes <- sort(unique(train_routes))
         self$route_mapping <- setNames(seq_along(unique_routes) - 1, unique_routes)
@@ -539,14 +571,12 @@ DataSplit <- R6Class("DataSplit",
 
       if (length(cols_present) == 0) return()
 
-      # Scale train data and save the center/scale (mean/std)
       scaled_train <- scale(self$data_train[cols_present])
       self$scaler_center <- attr(scaled_train, "scaled:center")
       self$scaler_scale <- attr(scaled_train, "scaled:scale")
 
       self$data_train[cols_present] <- as.data.frame(scaled_train)
 
-      # Scale test data using the train data's center and scale
       scaled_test <- scale(self$data_test[cols_present], center = self$scaler_center, scale = self$scaler_scale)
       self$data_test[cols_present] <- as.data.frame(scaled_test)
 
@@ -581,6 +611,8 @@ EDA <- R6Class("EDA",
     },
 
     summary = function() {
+      if (!self$verbose) return(invisible(self))
+
       cat("Exploratory Data Analysis (EDA) Report\n")
       cat(strrep("-", 50), "\n")
       cat(sprintf("Shape: %d rows, %d columns\n", nrow(self$data), ncol(self$data)))
@@ -596,13 +628,12 @@ EDA <- R6Class("EDA",
       invisible(self)
     },
 
-    plot_target_distribution = function(bins = 80, clip_range = c(-60, 180)) {
+    plot_target_distribution = function(bins = 80, clip_range = c(-60, 180), export = FALSE) {
       if (!"ARR_DELAY" %in% names(self$data)) {
         cat("ARR_DELAY column not found.\n")
         return(invisible(self))
       }
 
-      # Clip values
       plot_data <- data.frame(
         ARR_DELAY = pmax(clip_range[1], pmin(clip_range[2], self$data$ARR_DELAY))
       )
@@ -610,69 +641,60 @@ EDA <- R6Class("EDA",
       p <- ggplot(plot_data, aes(x = ARR_DELAY)) +
         geom_histogram(aes(y = after_stat(density)), bins = bins, fill = "dodgerblue", color = "white", alpha = 0.85) +
         geom_density(color = "#005b96", linewidth = 1) +
-        labs(title = "Arrival Delay Distribution (Clipped)", x = "Arrival Delay (minutes)", y = "Count") +
+        labs(title = "Arrival Delay Distribution (Clipped)", x = "Arrival Delay (minutes)", y = "Density") +
         self$base_theme
 
       print(p)
+      if (export) private$export_current_plot(p, "distributions", "arrival_delay_distribution_clipped")
       invisible(self)
     },
 
-    plot_numeric_distributions = function(columns = NULL, bins = 40) {
+    plot_numeric_distributions = function(columns = 2, bins = 40, export = FALSE) {
       if (is.null(columns)) {
-        columns <- names(self$data)[sapply(self$data, is.numeric)]
+        columns <- c("CRS_ELAPSED_TIME", "DISTANCE", "AVG_SPEED", "ARR_DELAY")
       }
-      columns <- intersect(columns, names(self$data))
+      existing_cols <- intersect(columns, names(self$data))
 
-      if (length(columns) == 0) {
+      if (length(existing_cols) == 0) {
         cat("No valid numeric columns found.\n")
         return(invisible(self))
       }
 
       plots <- list()
-      for (col in columns) {
+      for (col in existing_cols) {
         plot_vals <- self$data[[col]]
         if (col == 'ARR_DELAY') {
           plot_vals <- pmax(-60, pmin(180, plot_vals))
         }
 
         df <- data.frame(val = plot_vals)
-        p <- ggplot(df, aes(x = val)) +
+        plots[[col]] <- ggplot(df, aes(x = val)) +
           geom_histogram(aes(y = after_stat(density)), bins = bins, fill = "#66c2a5", color = "white", alpha = 0.9) +
           geom_density(color = "#3288bd", linewidth = 0.8) +
-          labs(title = sprintf("Distribution of %s", col), x = col, y = "Count") +
+          labs(title = sprintf("Distribution of %s", col), x = col, y = "Density") +
           self$base_theme
-
-        plots[[col]] <- p
       }
 
-      # Combine plots using patchwork
       combined_plot <- wrap_plots(plots, ncol = 2)
       print(combined_plot)
+      if (export) private$export_current_plot(combined_plot, "distributions", "numeric_distributions", width=14, height=5*ceiling(length(plots)/2))
       invisible(self)
     },
 
-    plot_boxplots = function(columns = NULL, clip_dict = NULL) {
+    plot_boxplots = function(columns = 3, clip_dict = NULL, export = FALSE) {
       if (is.null(columns)) {
-        columns <- c('CRS_DEP_TIME', 'CRS_ARR_TIME', 'CRS_ELAPSED_TIME', 'DISTANCE', 'ARR_DELAY',
-                     'SEASON', 'FL_DAY_OF_WEEK', 'FL_MONTH', 'AVG_SPEED')
+        columns <- c("CRS_ELAPSED_TIME", "DISTANCE", "ARR_DELAY", "AVG_SPEED")
       }
 
       if (is.null(clip_dict)) {
         clip_dict <- list(
-          'CRS_DEP_TIME' = c(0, 1440), 'CRS_ARR_TIME' = c(0, 1440),
           'CRS_ELAPSED_TIME' = c(0, 400), 'DISTANCE' = c(0, 3000),
-          'ARR_DELAY' = c(-60, 300), 'SEASON' = c(1, 4),
-          'FL_DAY_OF_WEEK' = c(1, 7), 'FL_MONTH' = c(1, 12),
-          'AVG_SPEED' = c(1, 6), 'PEAK_MORNING' = c(0, 1),
-          'PEAK_EVENING' = c(0, 1)
+          'ARR_DELAY' = c(-60, 300), 'AVG_SPEED' = c(1, 6)
         )
       }
 
       existing_cols <- intersect(columns, names(self$data))
-      if (length(existing_cols) == 0) {
-        cat("No valid columns found for boxplots.\n")
-        return(invisible(self))
-      }
+      if (length(existing_cols) == 0) return(invisible(self))
 
       plots <- list()
       for (col in existing_cols) {
@@ -683,115 +705,131 @@ EDA <- R6Class("EDA",
         }
 
         df <- data.frame(val = plot_vals)
-        p <- ggplot(df, aes(x = val)) +
+        plots[[col]] <- ggplot(df, aes(x = val)) +
           geom_boxplot(fill = "#fdae61", color = "#d53e4f", width = 0.5, outlier.shape = NA) +
           labs(title = sprintf("Boxplot of %s (Clipped)", col), x = col) +
           self$base_theme +
           theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
-
-        plots[[col]] <- p
       }
 
-      combined_plot <- wrap_plots(plots, ncol = 3)
+      combined_plot <- wrap_plots(plots, ncol = 1)
       print(combined_plot)
+      if (export) private$export_current_plot(combined_plot, "boxplots", "continuous_boxplots", width=12, height=3.5*length(plots))
       invisible(self)
     },
 
-    plot_correlation_heatmap = function() {
-      target_cols <- c("AVG_SPEED", "DISTANCE", "CRS_ELAPSED_TIME", "ARR_DELAY")
+    plot_cyclical_time_features = function(export = FALSE) {
+      pairs <- list(
+        c("CRS_DEP_TIME_sin", "CRS_DEP_TIME_cos", "Scheduled Departure Time"),
+        c("CRS_ARR_TIME_sin", "CRS_ARR_TIME_cos", "Scheduled Arrival Time")
+      )
 
-      cols_present <- intersect(target_cols, names(self$data))
+      plots <- list()
+      for (pair in pairs) {
+        if (all(pair[1:2] %in% names(self$data))) {
+          df <- self$data[, pair[1:2]]
+          df <- df[complete.cases(df), ]
+          names(df) <- c("sin", "cos")
 
-      numeric_data <- self$data[, cols_present, drop = FALSE]
-
-      if (ncol(numeric_data) < 2) {
-        cat("Not enough of the specified columns are available for the correlation heatmap.\n")
-        return(invisible(self))
+          plots[[pair[3]]] <- ggplot(df, aes(x = cos, y = sin)) +
+            geom_point(alpha = 0.25, size = 1) +
+            annotate("path", x=cos(seq(0,2*pi,length.out=100)), y=sin(seq(0,2*pi,length.out=100)), linetype="dashed", alpha=0.5) +
+            coord_fixed(xlim = c(-1.1, 1.1), ylim = c(-1.1, 1.1)) +
+            labs(title = pair[3], x = "Cosine", y = "Sine") +
+            self$base_theme
+        }
       }
 
-      corr_matrix <- cor(numeric_data, use = "pairwise.complete.obs")
+      if(length(plots) > 0) {
+        combined_plot <- wrap_plots(plots, nrow = 1)
+        print(combined_plot)
+        if (export) private$export_current_plot(combined_plot, "cyclical_features", "cyclical_time_features", width=7*length(plots), height=6)
+      }
+      invisible(self)
+    },
 
+    plot_correlation_heatmap = function(export = FALSE) {
+      target_cols <- c("DISTANCE", "CRS_ELAPSED_TIME", "ARR_DELAY", "AVG_SPEED",
+                       "PEAK_MORNING", "PEAK_EVENING", "CRS_DEP_TIME_sin",
+                       "CRS_DEP_TIME_cos", "CRS_ARR_TIME_sin", "CRS_ARR_TIME_cos")
+      cols_present <- intersect(target_cols, names(self$data))
+
+      if (length(cols_present) < 2) return(invisible(self))
+
+      corr_matrix <- cor(self$data[, cols_present], use = "pairwise.complete.obs")
       corr_df <- as.data.frame(as.table(corr_matrix))
 
       p <- ggplot(corr_df, aes(x = Var1, y = Var2, fill = Freq)) +
         geom_tile(color = "white") +
-        geom_text(aes(label = sprintf("%.2f", Freq)), size = 4) + # Bumped size slightly since there are fewer boxes
+        geom_text(aes(label = sprintf("%.2f", Freq)), size = 3) +
         scale_fill_gradient2(low = "#4575b4", mid = "white", high = "#d73027", midpoint = 0, limit = c(-1, 1), name = "Corr") +
-        labs(title = "Correlation Heatmap (Selected Features)", x = "", y = "") +
+        labs(title = "Correlation Heatmap", x = "", y = "") +
         self$base_theme +
         theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
 
       print(p)
+      if (export) private$export_current_plot(p, "correlations", "correlation_heatmap", width=12, height=8)
       invisible(self)
     },
 
-    plot_delay_by_day_of_week = function() {
-      if (!all(c('FL_DAY_OF_WEEK', 'ARR_DELAY') %in% names(self$data))) {
-        cat("FL_DAY_OF_WEEK and/or ARR_DELAY not found.\n")
-        return(invisible(self))
-      }
+    plot_delay_by_day_of_week = function(export = FALSE) {
+      if (!all(c('FL_DAY_OF_WEEK', 'ARR_DELAY') %in% names(self$data))) return(invisible(self))
 
       delay_by_day <- self$data %>%
         group_by(FL_DAY_OF_WEEK) %>%
-        summarize(ARR_DELAY = median(ARR_DELAY, na.rm = TRUE), .groups = 'drop')
+        summarize(ARR_DELAY = mean(ARR_DELAY, na.rm = TRUE), .groups = 'drop')
 
       p <- ggplot(delay_by_day, aes(x = as.factor(FL_DAY_OF_WEEK), y = ARR_DELAY, fill = as.factor(FL_DAY_OF_WEEK))) +
         geom_col(show.legend = FALSE) +
         scale_fill_viridis_d() +
-        labs(title = "Median Arrival Delay by Day of Week", x = "Day of Week", y = "Median Delay (minutes)") +
+        labs(title = "Mean Arrival Delay by Day of Week", x = "Day of Week", y = "Mean Delay (minutes)") +
         self$base_theme
 
       print(p)
+      if (export) private$export_current_plot(p, "barplots", "mean_arrival_delay_by_day_of_week", width=10, height=5)
       invisible(self)
     },
 
-    plot_delay_rate_by_day_of_week = function() {
-      if (!all(c('FL_DAY_OF_WEEK', 'ARR_DELAY') %in% names(self$data))) {
-        cat("FL_DAY_OF_WEEK and/or ARR_DELAY not found.\n")
-        return(invisible(self))
-      }
+    plot_delay_rate_by_day_of_week = function(export = FALSE) {
+      if (!all(c('FL_DAY_OF_WEEK', 'ARR_DELAY') %in% names(self$data))) return(invisible(self))
 
       delay_rate <- self$data %>%
         mutate(DELAYED = ifelse(ARR_DELAY > 0, 1, 0)) %>%
         group_by(FL_DAY_OF_WEEK) %>%
-        summarize(DELAYED = mean(DELAYED, na.rm = TRUE), .groups = 'drop')
+        summarize(DELAYED = mean(DELAYED, na.rm = TRUE) * 100, .groups = 'drop')
 
       p <- ggplot(delay_rate, aes(x = as.factor(FL_DAY_OF_WEEK), y = DELAYED, fill = as.factor(FL_DAY_OF_WEEK))) +
         geom_col(show.legend = FALSE) +
         scale_fill_viridis_d(option = "magma") +
-        labs(title = "Proportion of Delayed Flights by Day of Week", x = "Day of Week", y = "Delay Rate") +
+        labs(title = "Proportion of Delayed Flights by Day of Week", x = "Day of Week", y = "Delay Rate (%)") +
         self$base_theme
 
       print(p)
+      if (export) private$export_current_plot(p, "barplots", "delay_rate_by_day_of_week", width=10, height=5)
       invisible(self)
     },
 
-    plot_delay_by_month = function() {
-      if (!all(c('FL_MONTH', 'ARR_DELAY') %in% names(self$data))) {
-        cat("FL_MONTH and/or ARR_DELAY not found.\n")
-        return(invisible(self))
-      }
+    plot_delay_by_month = function(export = FALSE) {
+      if (!all(c('FL_MONTH', 'ARR_DELAY') %in% names(self$data))) return(invisible(self))
 
       delay_by_month <- self$data %>%
         group_by(FL_MONTH) %>%
-        summarize(ARR_DELAY = median(ARR_DELAY, na.rm = TRUE), .groups = 'drop')
+        summarize(ARR_DELAY = mean(ARR_DELAY, na.rm = TRUE), .groups = 'drop')
 
       p <- ggplot(delay_by_month, aes(x = FL_MONTH, y = ARR_DELAY)) +
         geom_line(color = "#008080", linewidth = 1.5) +
         geom_point(color = "darkslategray", size = 3) +
         scale_x_continuous(breaks = 1:12) +
-        labs(title = "Median Arrival Delay by Month", x = "Month", y = "Median Delay (minutes)") +
+        labs(title = "Mean Arrival Delay by Month", x = "Month", y = "Mean Delay (minutes)") +
         self$base_theme
 
       print(p)
+      if (export) private$export_current_plot(p, "lineplots", "mean_arrival_delay_by_month", width=12, height=5)
       invisible(self)
     },
 
-    plot_delay_vs_distance = function() {
-      if (!all(c('DISTANCE', 'ARR_DELAY') %in% names(self$data))) {
-        cat("DISTANCE and/or ARR_DELAY not found.\n")
-        return(invisible(self))
-      }
+    plot_delay_vs_distance = function(export = FALSE) {
+      if (!all(c('DISTANCE', 'ARR_DELAY') %in% names(self$data))) return(invisible(self))
 
       df <- data.frame(
         DISTANCE = self$data$DISTANCE,
@@ -799,20 +837,18 @@ EDA <- R6Class("EDA",
       )
 
       p <- ggplot(df, aes(x = DISTANCE, y = ARR_DELAY)) +
-        geom_bin2d(bins = 50) +
-        scale_fill_viridis_c(name = "Flights") +
+        geom_point(alpha = 0.35, size = 1, color = "steelblue") +
+        geom_smooth(method = "lm", color = "red", linewidth = 1) +
         labs(title = "Arrival Delay vs Distance", x = "Distance (miles)", y = "Arrival Delay (minutes, clipped)") +
         self$base_theme
 
       print(p)
+      if (export) private$export_current_plot(p, "scatterplots", "arrival_delay_vs_distance", width=10, height=6)
       invisible(self)
     },
 
-    plot_delay_vs_elapsed_time = function() {
-      if (!all(c('CRS_ELAPSED_TIME', 'ARR_DELAY') %in% names(self$data))) {
-        cat("CRS_ELAPSED_TIME and/or ARR_DELAY not found.\n")
-        return(invisible(self))
-      }
+    plot_delay_vs_elapsed_time = function(export = FALSE) {
+      if (!all(c('CRS_ELAPSED_TIME', 'ARR_DELAY') %in% names(self$data))) return(invisible(self))
 
       df <- data.frame(
         CRS_ELAPSED_TIME = self$data$CRS_ELAPSED_TIME,
@@ -820,180 +856,222 @@ EDA <- R6Class("EDA",
       )
 
       p <- ggplot(df, aes(x = CRS_ELAPSED_TIME, y = ARR_DELAY)) +
-        geom_bin2d(bins = 45) +
-        scale_fill_viridis_c(option = "plasma", name = "Flights") +
+        geom_point(alpha = 0.35, size = 1, color = "steelblue") +
+        geom_smooth(method = "lm", color = "red", linewidth = 1) +
         labs(title = "Arrival Delay vs Scheduled Elapsed Time", x = "Scheduled Elapsed Time (minutes)", y = "Arrival Delay (minutes, clipped)") +
         self$base_theme
 
       print(p)
+      if (export) private$export_current_plot(p, "scatterplots", "arrival_delay_vs_elapsed_time", width=10, height=6)
       invisible(self)
     },
 
-    plot_top_origin_cities_by_average_delay = function(top_n = 15, min_flights = 2000) {
-      if (!all(c('ORIGIN_CITY', 'ARR_DELAY') %in% names(self$data))) {
-        cat("ORIGIN_CITY and/or ARR_DELAY not found.\n")
-        return(invisible(self))
-      }
+    plot_delay_heatmap_month_day = function(export = FALSE) {
+      if (!all(c('FL_MONTH', 'FL_DAY_OF_WEEK', 'ARR_DELAY') %in% names(self$data))) return(invisible(self))
 
-      city_stats <- self$data %>%
-        group_by(ORIGIN_CITY) %>%
-        summarize(avg_delay = mean(ARR_DELAY, na.rm = TRUE), flights = n(), .groups = 'drop') %>%
-        filter(flights >= min_flights) %>%
-        arrange(desc(avg_delay)) %>%
-        head(top_n)
+      pivot <- self$data %>%
+        group_by(FL_DAY_OF_WEEK, FL_MONTH) %>%
+        summarize(ARR_DELAY = mean(ARR_DELAY, na.rm = TRUE), .groups = 'drop')
 
-      p <- ggplot(city_stats, aes(x = avg_delay, y = reorder(ORIGIN_CITY, avg_delay), fill = avg_delay)) +
-        geom_col(show.legend = FALSE) +
-        scale_fill_viridis_c(option = "magma") +
-        labs(title = sprintf("Top %d Origin Cities by Average Delay", top_n), x = "Average Arrival Delay (minutes)", y = "Origin City") +
+      p <- ggplot(pivot, aes(x = as.factor(FL_MONTH), y = as.factor(FL_DAY_OF_WEEK), fill = ARR_DELAY)) +
+        geom_tile(color = "white") +
+        geom_text(aes(label = sprintf("%.1f", ARR_DELAY)), color = "black", size = 3) +
+        scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = mean(pivot$ARR_DELAY)) +
+        labs(title = "Mean Arrival Delay by Month and Day of Week", x = "Month", y = "Day of Week") +
         self$base_theme
 
       print(p)
+      if (export) private$export_current_plot(p, "heatmaps", "mean_arrival_delay_month_day", width=12, height=6)
       invisible(self)
     },
 
-    plot_top_dest_cities_by_average_delay = function(top_n = 15, min_flights = 2000) {
-      if (!all(c('DEST_CITY', 'ARR_DELAY') %in% names(self$data))) {
-        cat("DEST_CITY and/or ARR_DELAY not found.\n")
-        return(invisible(self))
-      }
+    plot_departure_time_month_heatmap = function(bins = 24, export = FALSE) {
+      req_cols <- c("CRS_DEP_TIME_sin", "CRS_DEP_TIME_cos", "FL_MONTH", "ARR_DELAY")
+      if (!all(req_cols %in% names(self$data))) return(invisible(self))
 
-      city_stats <- self$data %>%
-        group_by(DEST_CITY) %>%
-        summarize(avg_delay = mean(ARR_DELAY, na.rm = TRUE), flights = n(), .groups = 'drop') %>%
-        filter(flights >= min_flights) %>%
-        arrange(desc(avg_delay)) %>%
-        head(top_n)
+      df_plot <- self$data[, req_cols]
+      df_plot <- df_plot[complete.cases(df_plot), ]
 
-      p <- ggplot(city_stats, aes(x = avg_delay, y = reorder(DEST_CITY, avg_delay), fill = avg_delay)) +
-        geom_col(show.legend = FALSE) +
-        scale_fill_viridis_c(option = "mako") +
-        labs(title = sprintf("Top %d Destination Cities by Average Delay", top_n), x = "Average Arrival Delay (minutes)", y = "Destination City") +
+      angles <- atan2(df_plot$CRS_DEP_TIME_sin, df_plot$CRS_DEP_TIME_cos)
+      angles <- (angles + 2 * pi) %% (2 * pi)
+
+      breaks <- seq(0, 2 * pi, length.out = bins + 1)
+      labels <- sprintf("%02d:00", 0:(bins-1))
+      df_plot$time_bin <- cut(angles, breaks = breaks, labels = labels, include.lowest = TRUE)
+
+      pivot <- df_plot %>%
+        group_by(time_bin, FL_MONTH) %>%
+        summarize(ARR_DELAY = mean(ARR_DELAY, na.rm=TRUE), .groups='drop')
+
+      p <- ggplot(pivot, aes(x = as.factor(FL_MONTH), y = time_bin, fill = ARR_DELAY)) +
+        geom_tile() +
+        scale_fill_viridis_c(option="viridis") +
+        labs(title = "Mean Delay by Departure Time and Month", x = "Month", y = "Departure Time Bin") +
         self$base_theme
 
       print(p)
+      if (export) private$export_current_plot(p, "heatmaps", "mean_delay_departure_time_month", width=12, height=8)
       invisible(self)
     },
 
-    plot_top_airlines_by_average_delay = function(top_n = 15, min_flights = 5000) {
-      if (!all(c('DOT_CODE', 'ARR_DELAY') %in% names(self$data))) {
-        cat("DOT_CODE and/or ARR_DELAY not found.\n")
-        return(invisible(self))
-      }
+    plot_delay_by_departure_time_circle = function(bins = 24, export = FALSE) {
+      req_cols <- c("CRS_DEP_TIME_sin", "CRS_DEP_TIME_cos", "ARR_DELAY")
+      if (!all(req_cols %in% names(self$data))) return(invisible(self))
 
-      airline_stats <- self$data %>%
-        group_by(DOT_CODE) %>%
-        summarize(avg_delay = mean(ARR_DELAY, na.rm = TRUE), flights = n(), .groups = 'drop') %>%
-        filter(flights >= min_flights) %>%
-        arrange(desc(avg_delay)) %>%
-        head(top_n)
+      df_plot <- self$data[, req_cols]
+      df_plot <- df_plot[complete.cases(df_plot), ]
 
-      p <- ggplot(airline_stats, aes(x = avg_delay, y = reorder(as.character(DOT_CODE), avg_delay), fill = avg_delay)) +
-        geom_col(show.legend = FALSE) +
-        scale_fill_viridis_c(option = "rocket") +
-        labs(title = sprintf("Top %d Airlines (DOT_CODE) by Average Delay", top_n), x = "Average Arrival Delay (minutes)", y = "DOT_CODE") +
-        self$base_theme
+      angles <- atan2(df_plot$CRS_DEP_TIME_sin, df_plot$CRS_DEP_TIME_cos)
+      angles <- (angles + 2 * pi) %% (2 * pi)
+
+      breaks <- seq(0, 2 * pi, length.out = bins + 1)
+      df_plot$time_bin <- cut(angles, breaks = breaks, labels = FALSE, include.lowest = TRUE)
+
+      summary <- df_plot %>%
+        group_by(time_bin) %>%
+        summarize(ARR_DELAY = mean(ARR_DELAY, na.rm=TRUE), .groups='drop')
+
+      # Simple polar approximation in ggplot
+      p <- ggplot(summary, aes(x = time_bin, y = ARR_DELAY)) +
+        geom_polygon(fill = "dodgerblue", alpha = 0.25, color = "blue") +
+        geom_point() +
+        coord_polar(theta = "x") +
+        labs(title = "Mean Arrival Delay by Scheduled Departure Time") +
+        theme_minimal()
 
       print(p)
+      if (export) private$export_current_plot(p, "polar_plots", "mean_arrival_delay_by_departure_time", width=8, height=8)
       invisible(self)
     },
 
-    plot_top_routes_by_average_delay = function(top_n = 15, min_flights = 2000) {
-      if (!all(c('ROUTE', 'ARR_DELAY') %in% names(self$data))) {
-        cat("ROUTE and/or ARR_DELAY not found.\n")
-        return(invisible(self))
-      }
+    plot_route_delay_rate = function(top_n = 15, min_flights = 3000, export = FALSE) {
+      if (!all(c('ROUTE', 'ARR_DELAY') %in% names(self$data))) return(invisible(self))
 
-      route_stats <- self$data %>%
+      stats <- self$data %>%
+        mutate(DELAYED = ifelse(ARR_DELAY > 0, 1, 0)) %>%
         group_by(ROUTE) %>%
-        summarize(avg_delay = mean(ARR_DELAY, na.rm = TRUE), flights = n(), .groups = 'drop') %>%
+        summarize(delay_rate = mean(DELAYED, na.rm=TRUE) * 100, flights = n(), .groups='drop') %>%
         filter(flights >= min_flights) %>%
-        arrange(desc(avg_delay)) %>%
+        arrange(desc(flights)) %>%
         head(top_n)
 
-      p <- ggplot(route_stats, aes(x = avg_delay, y = reorder(ROUTE, avg_delay), fill = avg_delay)) +
+      p <- ggplot(stats, aes(x = delay_rate, y = reorder(ROUTE, delay_rate), fill = delay_rate)) +
         geom_col(show.legend = FALSE) +
         scale_fill_viridis_c() +
-        labs(title = sprintf("Top %d Routes by Average Delay", top_n), x = "Average Arrival Delay (minutes)", y = "Route") +
+        labs(title = "Delay Rate (%) for Top Busy Routes", x = "Delay Rate (%)", y = "Route") +
         self$base_theme
 
       print(p)
+      if (export) private$export_current_plot(p, "barplots", "route_delay_rate_busy_routes", width=12, height=6)
       invisible(self)
     },
 
-    plot_top_origin_sta_by_average_delay = function(top_n = 15, min_flights = 2000) {
-      if (!all(c('ORIGIN_STATE', 'ARR_DELAY') %in% names(self$data))) {
-        cat("ORIGIN_STATE and/or ARR_DELAY not found.\n")
-        return(invisible(self))
-      }
+    plot_delay_by_season_violin = function(export = FALSE) {
+      if (!all(c('SEASON', 'ARR_DELAY') %in% names(self$data))) return(invisible(self))
 
-      state_stats <- self$data %>%
-        group_by(ORIGIN_STATE) %>%
-        summarize(avg_delay = mean(ARR_DELAY, na.rm = TRUE), flights = n(), .groups = 'drop') %>%
-        filter(flights >= min_flights) %>%
-        arrange(desc(avg_delay)) %>%
-        head(top_n)
+      df_plot <- data.frame(
+        SEASON = as.factor(self$data$SEASON),
+        ARR_DELAY = pmax(-60, pmin(180, self$data$ARR_DELAY))
+      )
 
-      p <- ggplot(state_stats, aes(x = avg_delay, y = reorder(ORIGIN_STATE, avg_delay), fill = avg_delay)) +
-        geom_col(show.legend = FALSE) +
-        scale_fill_viridis_c(option = "magma") +
-        labs(title = sprintf("Top %d Origin States by Average Delay", top_n), x = "Average Arrival Delay (minutes)", y = "Origin State") +
-        self$base_theme
+      p <- ggplot(df_plot, aes(x = SEASON, y = ARR_DELAY, fill = SEASON)) +
+        geom_violin(trim = FALSE, alpha = 0.7) +
+        geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+        labs(title = "Arrival Delay Distribution by Season", x = "Season", y = "Arrival Delay (minutes, clipped)") +
+        self$base_theme + theme(legend.position = "none")
 
       print(p)
+      if (export) private$export_current_plot(p, "violin_plots", "arrival_delay_by_season", width=10, height=6)
       invisible(self)
     },
 
-    plot_top_dest_state_by_average_delay = function(top_n = 15, min_flights = 2000) {
-      if (!all(c('DEST_STATE', 'ARR_DELAY') %in% names(self$data))) {
-        cat("DEST_STATE and/or ARR_DELAY not found.\n")
-        return(invisible(self))
-      }
+    plot_origin_city_volume_vs_delay = function(min_flights = 2000, export = FALSE) {
+      if (!all(c('ORIGIN_CITY', 'ARR_DELAY') %in% names(self$data))) return(invisible(self))
 
-      state_stats <- self$data %>%
-        group_by(DEST_STATE) %>%
-        summarize(avg_delay = mean(ARR_DELAY, na.rm = TRUE), flights = n(), .groups = 'drop') %>%
-        filter(flights >= min_flights) %>%
-        arrange(desc(avg_delay)) %>%
-        head(top_n)
+      stats <- self$data %>%
+        group_by(ORIGIN_CITY) %>%
+        summarize(avg_delay = mean(ARR_DELAY, na.rm=TRUE), flights = n(), .groups='drop') %>%
+        filter(flights >= min_flights)
 
-      p <- ggplot(state_stats, aes(x = avg_delay, y = reorder(DEST_STATE, avg_delay), fill = avg_delay)) +
-        geom_col(show.legend = FALSE) +
-        scale_fill_viridis_c(option = "mako") +
-        labs(title = sprintf("Top %d Destination States by Average Delay", top_n), x = "Average Arrival Delay (minutes)", y = "Destination State") +
+      p <- ggplot(stats, aes(x = flights, y = avg_delay)) +
+        geom_point(alpha = 0.7, color = "darkred", size=2) +
+        labs(title = "Origin City: Flight Volume vs Average Delay", x = "Number of Flights", y = "Average Arrival Delay") +
         self$base_theme
 
       print(p)
+      if (export) private$export_current_plot(p, "scatterplots", "origin_city_volume_vs_average_delay", width=12, height=7)
       invisible(self)
     },
 
     plot_all_core = function() {
       self$summary()$
         plot_target_distribution()$
-        plot_numeric_distributions(columns = c(
-          'CRS_DEP_TIME', 'CRS_ARR_TIME', 'CRS_ELAPSED_TIME',
-          'DISTANCE', 'SEASON', 'FL_DAY_OF_WEEK', 'FL_MONTH',
-          'AVG_SPEED', 'PEAK_MORNING', 'PEAK_EVENING'
-        ))$
-        plot_boxplots(columns = c(
-          'CRS_DEP_TIME', 'CRS_ARR_TIME', 'CRS_ELAPSED_TIME',
-          'DISTANCE', 'SEASON', 'FL_DAY_OF_WEEK', 'FL_MONTH',
-          'ARR_DELAY', 'AVG_SPEED', 'PEAK_MORNING', 'PEAK_EVENING'
-        ))$
+        plot_numeric_distributions()$
+        plot_boxplots()$
+        plot_cyclical_time_features()$
         plot_correlation_heatmap()$
         plot_delay_by_day_of_week()$
         plot_delay_rate_by_day_of_week()$
         plot_delay_by_month()$
         plot_delay_vs_distance()$
         plot_delay_vs_elapsed_time()$
-        plot_top_origin_cities_by_average_delay()$
-        plot_top_dest_cities_by_average_delay()$
-        plot_top_airlines_by_average_delay()$
-        plot_top_routes_by_average_delay()$
-        plot_top_origin_sta_by_average_delay()$
-        plot_top_dest_state_by_average_delay()
+        plot_delay_heatmap_month_day()$
+        plot_departure_time_month_heatmap()$
+        plot_delay_by_departure_time_circle()$
+        plot_route_delay_rate()$
+        plot_delay_by_season_violin()$
+        plot_origin_city_volume_vs_delay()
 
       invisible(self)
+    },
+
+    export_all_core = function() {
+      self$plot_target_distribution(export=TRUE)$
+        plot_numeric_distributions(export=TRUE)$
+        plot_boxplots(export=TRUE)$
+        plot_cyclical_time_features(export=TRUE)$
+        plot_correlation_heatmap(export=TRUE)$
+        plot_delay_by_day_of_week(export=TRUE)$
+        plot_delay_rate_by_day_of_week(export=TRUE)$
+        plot_delay_by_month(export=TRUE)$
+        plot_delay_vs_distance(export=TRUE)$
+        plot_delay_vs_elapsed_time(export=TRUE)$
+        plot_delay_heatmap_month_day(export=TRUE)$
+        plot_departure_time_month_heatmap(export=TRUE)$
+        plot_delay_by_departure_time_circle(export=TRUE)$
+        plot_route_delay_rate(export=TRUE)$
+        plot_delay_by_season_violin(export=TRUE)$
+        plot_origin_city_volume_vs_delay(export=TRUE)
+
+      invisible(self)
+    }
+  ),
+
+  private = list(
+    sanitize_filename = function(name) {
+      safe <- gsub("[^[:alnum:]_\\- ]", "_", name)
+      safe <- trimws(safe)
+      safe <- gsub(" ", "_", safe)
+      return(tolower(safe))
+    },
+
+    ensure_plot_folder = function(plot_type) {
+      base_dir <- file.path("..", "Output files")
+      plot_dir <- file.path(base_dir, plot_type)
+      dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+      return(plot_dir)
+    },
+
+    export_current_plot = function(p, plot_type, plot_name, dpi = 300, width=10, height=6) {
+      folder <- private$ensure_plot_folder(plot_type)
+      filename <- paste0(private$sanitize_filename(plot_name), ".png")
+      filepath <- file.path(folder, filename)
+
+      ggsave(filename = filepath, plot = p, dpi = dpi, width = width, height = height, bg="white")
+
+      if (self$verbose) {
+        cat(sprintf("Saved plot to: %s\n", filepath))
+      }
     }
   )
 )
@@ -1003,103 +1081,142 @@ DimReduction <- R6Class("DimReduction",
     data = NULL,
     labels = NULL,
     verbose = NULL,
-    base_theme = NULL,
 
     pca_result = NULL,
+    pca_model = NULL,
+    pca_labels = NULL,
+
     umap_result = NULL,
     umap_labels = NULL,
+    base_theme = NULL,
 
     initialize = function(data, labels, verbose = TRUE) {
       self$data <- as.data.frame(data)
-      self$labels <- labels
+      self$labels <- as.vector(labels)
       self$verbose <- verbose
 
+      # Global plot style mimicking seaborn whitegrid
       self$base_theme <- theme_minimal(base_size = 14) +
         theme(
           plot.background = element_rect(fill = "white", color = NA),
           panel.background = element_rect(fill = "#f8f9fa", color = "#333333"),
+          panel.grid.major = element_line(color = "grey90"),
+          panel.grid.minor = element_blank(),
           plot.title = element_text(face = "bold", hjust = 0.5)
         )
     },
 
-    run_pca = function() {
+    run_pca = function(feature_cols = NULL) {
       if (self$verbose) cat("\n--- Running PCA (Linear) ---\n")
 
-      target_cols <- c("AVG_SPEED", "DISTANCE", "CRS_ELAPSED_TIME", "ARR_DELAY")
-      cols_present <- intersect(target_cols, names(self$data))
+      cols_present <- private$get_feature_columns(feature_cols)
 
       if (length(cols_present) < 2) {
-        cat("Not enough target columns found to run PCA.\n")
+        cat("Not enough feature columns found to run PCA.\n")
         return(invisible(self))
       }
 
       numeric_data <- self$data[, cols_present, drop = FALSE]
-      self$pca_result <- prcomp(numeric_data, center = TRUE, scale. = TRUE)
 
-      var_explained <- self$pca_result$sdev^2 / sum(self$pca_result$sdev^2)
+      # Note: sklearn's PCA centers by default but does NOT scale.
+      # To match exactly, we set center = TRUE and scale. = FALSE
+      self$pca_model <- prcomp(numeric_data, center = TRUE, scale. = FALSE)
+      self$pca_result <- self$pca_model$x
+      self$pca_labels <- self$labels
+
       if (self$verbose) {
+        var_explained <- self$pca_model$sdev^2 / sum(self$pca_model$sdev^2)
+        cat(sprintf("Features used: %s\n", paste(cols_present, collapse = ", ")))
         cat(sprintf("PC1 explains %.2f%% of the variance.\n", var_explained[1] * 100))
-        cat(sprintf("PC2 explains %.2f%% of the variance.\n", var_explained[2] * 100))
+        if (length(var_explained) > 1) {
+          cat(sprintf("PC2 explains %.2f%% of the variance.\n", var_explained[2] * 100))
+        }
       }
 
       invisible(self)
     },
 
-    plot_pca = function(max_samples = 100000) {
+    plot_pca = function(max_samples = 100000, label_mode = "delay_categorical", export = FALSE) {
       if (is.null(self$pca_result)) {
         cat("Please run_pca() first.\n")
         return(invisible(self))
       }
 
-      n_rows <- nrow(self$pca_result$x)
+      n_rows <- nrow(self$pca_result)
 
       if (n_rows > max_samples) {
-        if (self$verbose) cat(sprintf("Plotting a random sample of %d points for visibility...\n", max_samples))
+        if (self$verbose) cat(sprintf("Plotting a random sample of %s points for visibility...\n", format(max_samples, big.mark = ",")))
         set.seed(42)
-        idx <- sample(seq_len(n_rows), max_samples)
+        idx <- sample.int(n_rows, max_samples)
       } else {
         idx <- seq_len(n_rows)
       }
 
-      status_vec <- ifelse(self$labels[idx] < 15, "On-time",
-                           ifelse(self$labels[idx] <= 30, "Short delay", "Long delay"))
-
       plot_df <- data.frame(
-        PC1 = self$pca_result$x[idx, 1],
-        PC2 = self$pca_result$x[idx, 2],
-        Status = factor(status_vec, levels = c("On-time", "Short delay", "Long delay"))
+        PC1 = self$pca_result[idx, 1],
+        PC2 = self$pca_result[idx, 2]
       )
 
-      p <- ggplot(plot_df, aes(x = PC1, y = PC2, color = Status)) +
-        geom_point(alpha = 0.5, size = 1) +
-        scale_color_manual(values = c("On-time" = "#4575b4", "Short delay" = "#fdae61", "Long delay" = "#d73027")) +
+      # Handle coloring based on label_mode
+      if (label_mode == "delay_categorical") {
+        plot_df$Label <- private$categorize_delay_labels(self$pca_labels[idx])
+        plot_df$Label <- factor(plot_df$Label, levels = c("On-time / Early", "Minor delay", "Moderate delay", "Long delay"))
+
+        palette <- c("On-time / Early" = "#4575b4", "Minor delay" = "#91bfdb",
+                     "Moderate delay" = "#fdae61", "Long delay" = "#d73027")
+
+        p <- ggplot(plot_df, aes(x = PC1, y = PC2, color = Label)) +
+          geom_point(alpha = 0.5, size = 1, stroke = 0) +
+          scale_color_manual(values = palette) +
+          theme(legend.position = "bottom", legend.title = element_blank())
+
+      } else if (label_mode == "generic_categorical") {
+        plot_df$Label <- as.factor(private$generic_categorical_labels(self$pca_labels[idx]))
+
+        p <- ggplot(plot_df, aes(x = PC1, y = PC2, color = Label)) +
+          geom_point(alpha = 0.5, size = 1, stroke = 0) +
+          labs(color = "Category")
+
+      } else if (label_mode == "continuous") {
+        plot_df$Label <- self$pca_labels[idx]
+
+        p <- ggplot(plot_df, aes(x = PC1, y = PC2, color = Label)) +
+          geom_point(alpha = 0.5, size = 1, stroke = 0) +
+          scale_color_distiller(palette = "RdYlBu", direction = -1, name = "Value") # Closest to coolwarm
+
+      } else {
+        cat("label_mode must be 'delay_categorical', 'generic_categorical', or 'continuous'.\n")
+        return(invisible(self))
+      }
+
+      # Add shared titles and themes
+      p <- p +
         labs(
-          title = sprintf("PCA: Flight Data Patterns (%dk Sample)", round(length(idx)/1000)),
+          title = sprintf("PCA: Flight Data Patterns (n=%s)", format(length(idx), big.mark = ",")),
           x = "Principal Component 1",
           y = "Principal Component 2"
         ) +
-        self$base_theme +
-        theme(legend.position = "bottom", legend.title = element_blank())
+        self$base_theme
 
       print(p)
+      if (export) private$export_current_plot(p, "dimensionality_reduction", paste0("pca_", label_mode))
       invisible(self)
     },
 
-    run_umap = function(n_neighbors = 15, min_dist = 0.1, max_samples = 100000) {
+    run_umap = function(feature_cols = NULL, n_neighbors = 15, min_dist = 0.1, max_samples = 100000) {
       if (self$verbose) cat("\n--- Running UMAP (Non-linear) ---\n")
 
-      target_cols <- c("AVG_SPEED", "DISTANCE", "CRS_ELAPSED_TIME", "ARR_DELAY")
-      cols_present <- intersect(target_cols, names(self$data))
+      cols_present <- private$get_feature_columns(feature_cols)
 
       if (length(cols_present) < 2) {
-        cat("Not enough target columns found to run UMAP.\n")
+        cat("Not enough feature columns found to run UMAP.\n")
         return(invisible(self))
       }
 
       if (nrow(self$data) > max_samples) {
-        if (self$verbose) cat(sprintf("Dataset too large! Downsampling to a random %d flights...\n", max_samples))
+        if (self$verbose) cat(sprintf("Dataset too large. Downsampling to %s rows...\n", format(max_samples, big.mark = ",")))
         set.seed(42)
-        idx <- sample(seq_len(nrow(self$data)), max_samples)
+        idx <- sample.int(nrow(self$data), max_samples)
 
         numeric_data <- self$data[idx, cols_present, drop = FALSE]
         self$umap_labels <- self$labels[idx]
@@ -1108,46 +1225,145 @@ DimReduction <- R6Class("DimReduction",
         self$umap_labels <- self$labels
       }
 
-      custom_config <- umap.defaults
-      custom_config$n_neighbors <- n_neighbors
-      custom_config$min_dist <- min_dist
-      custom_config$init <- "random"
+      if (self$verbose) {
+        cat(sprintf("Features used: %s\n", paste(cols_present, collapse = ", ")))
+        cat("Calculating UMAP...\n")
+      }
 
-      if (self$verbose) cat("Calculating UMAP (this will take 1-3 minutes)...\n")
-      self$umap_result <- umap(numeric_data, config = custom_config)
+      # Run UMAP using the uwot package
+      set.seed(42)
+      self$umap_result <- uwot::umap(
+        numeric_data,
+        n_neighbors = n_neighbors,
+        min_dist = min_dist,
+        init = "random",
+        verbose = FALSE
+      )
 
-      if (self$verbose) cat("UMAP complete!\n")
+      if (self$verbose) cat("UMAP complete.\n")
+
       invisible(self)
     },
 
-    plot_umap = function() {
+    plot_umap = function(label_mode = "delay_categorical", export = FALSE) {
       if (is.null(self$umap_result)) {
         cat("Please run_umap() first.\n")
         return(invisible(self))
       }
 
-      status_vec <- ifelse(self$umap_labels < 15, "On-time",
-                           ifelse(self$umap_labels <= 30, "Short delay", "Long delay"))
-
       plot_df <- data.frame(
-        UMAP1 = self$umap_result$layout[, 1],
-        UMAP2 = self$umap_result$layout[, 2],
-        Status = factor(status_vec, levels = c("On-time", "Short delay", "Long delay"))
+        UMAP1 = self$umap_result[, 1],
+        UMAP2 = self$umap_result[, 2]
       )
 
-      p <- ggplot(plot_df, aes(x = UMAP1, y = UMAP2, color = Status)) +
-        geom_point(alpha = 0.5, size = 1) +
-        scale_color_manual(values = c("On-time" = "#4575b4", "Short delay" = "#fdae61", "Long delay" = "#d73027")) +
-        labs(
-          title = "UMAP: Flight Data Patterns",
-          x = "UMAP Dimension 1",
-          y = "UMAP Dimension 2"
-        ) +
-        self$base_theme +
-        theme(legend.position = "bottom", legend.title = element_blank())
+      if (label_mode == "delay_categorical") {
+        plot_df$Label <- private$categorize_delay_labels(self$umap_labels)
+        plot_df$Label <- factor(plot_df$Label, levels = c("On-time / Early", "Minor delay", "Moderate delay", "Long delay"))
+
+        palette <- c("On-time / Early" = "#4575b4", "Minor delay" = "#91bfdb",
+                     "Moderate delay" = "#fdae61", "Long delay" = "#d73027")
+
+        p <- ggplot(plot_df, aes(x = UMAP1, y = UMAP2, color = Label)) +
+          geom_point(alpha = 0.5, size = 1, stroke = 0) +
+          scale_color_manual(values = palette) +
+          theme(legend.position = "bottom", legend.title = element_blank())
+
+      } else if (label_mode == "generic_categorical") {
+        plot_df$Label <- as.factor(private$generic_categorical_labels(self$umap_labels))
+
+        p <- ggplot(plot_df, aes(x = UMAP1, y = UMAP2, color = Label)) +
+          geom_point(alpha = 0.5, size = 1, stroke = 0) +
+          labs(color = "Category")
+
+      } else if (label_mode == "continuous") {
+        plot_df$Label <- self$umap_labels
+
+        p <- ggplot(plot_df, aes(x = UMAP1, y = UMAP2, color = Label)) +
+          geom_point(alpha = 0.5, size = 1, stroke = 0) +
+          scale_color_distiller(palette = "RdYlBu", direction = -1, name = "Value")
+
+      } else {
+        cat("label_mode must be 'delay_categorical', 'generic_categorical', or 'continuous'.\n")
+        return(invisible(self))
+      }
+
+      p <- p +
+        labs(title = "UMAP: Flight Data Patterns", x = "UMAP Dimension 1", y = "UMAP Dimension 2") +
+        self$base_theme
 
       print(p)
+      if (export) private$export_current_plot(p, "dimensionality_reduction", paste0("umap_", label_mode))
       invisible(self)
+    },
+
+    plot_all_core = function() {
+      self$run_pca()$
+        plot_pca()$
+        run_umap()$
+        plot_umap()
+
+      invisible(self)
+    },
+
+    export_all_core = function() {
+      self$run_pca()$
+        plot_pca(label_mode = "delay_categorical", export = TRUE)$
+        plot_pca(label_mode = "generic_categorical", export = TRUE)$
+        plot_pca(label_mode = "continuous", export = TRUE)$
+        run_umap()$
+        plot_umap(label_mode = "delay_categorical", export = TRUE)$
+        plot_umap(label_mode = "generic_categorical", export = TRUE)$
+        plot_umap(label_mode = "continuous", export = TRUE)
+
+      invisible(self)
+    }
+  ),
+
+  private = list(
+    sanitize_filename = function(name) {
+      safe <- gsub("[^[:alnum:]_\\- ]", "_", name)
+      safe <- trimws(safe)
+      safe <- gsub(" ", "_", safe)
+      return(tolower(safe))
+    },
+
+    ensure_plot_folder = function(plot_type) {
+      base_dir <- file.path("..", "Output files")
+      plot_dir <- file.path(base_dir, plot_type)
+      dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+      return(plot_dir)
+    },
+
+    export_current_plot = function(p, plot_type, plot_name, dpi = 300) {
+      folder <- private$ensure_plot_folder(plot_type)
+      filename <- paste0(private$sanitize_filename(plot_name), ".png")
+      filepath <- file.path(folder, filename)
+
+      ggsave(filename = filepath, plot = p, dpi = dpi, width = 9, height = 7, bg="white")
+
+      if (self$verbose) {
+        cat(sprintf("Saved plot to: %s\n", filepath))
+      }
+    },
+
+    get_feature_columns = function(feature_cols = NULL) {
+      if (is.null(feature_cols)) {
+        feature_cols <- c("AVG_SPEED", "DISTANCE", "CRS_ELAPSED_TIME")
+      }
+      return(intersect(feature_cols, names(self$data)))
+    },
+
+    categorize_delay_labels = function(labels) {
+      case_when(
+        labels <= 0  ~ "On-time / Early",
+        labels <= 15 ~ "Minor delay",
+        labels <= 60 ~ "Moderate delay",
+        TRUE         ~ "Long delay"
+      )
+    },
+
+    generic_categorical_labels = function(labels) {
+      as.character(labels)
     }
   )
 )
@@ -1253,7 +1469,7 @@ HypothesisTesting <- R6Class("HypothesisTesting",
 # ---------------------------------------------------------
 
 # 1. Load the dataset
-# Alternatively, if you just want to load it directly in base R:
+cat("\n--- Loading Dataset ---\n")
 df_flights <- read.csv("Project Datasets/flights_sample_3m.csv")
 
 # 2. Preprocess the data
@@ -1266,7 +1482,6 @@ df_flights_clean <- processor$
   filter_cancelled_diverted()$
   clean_na()$
   add_date_features()$
-  convert_scheduled_times()$
   convert_to_season()$
   is_weekend()$
   route()$
@@ -1275,8 +1490,10 @@ df_flights_clean <- processor$
   arr_hour()$
   peak_morning()$
   peak_evening()$
+  convert_scheduled_times_cyclical()$
   origin_state()$
   dest_state()$
+  fix_negative_delays()$
   export_to_csv('Project Datasets/cleaned_flights.csv')$
   get_data()
 cat("\n--- Finished Data Preprocessing ---\n")
@@ -1295,9 +1512,67 @@ cat("\n--- Finished Exploratory Data Analysis ---\n")
 
 # 5. PCA and UMAP
 cat("\n--- Running PCA and UMAP ---\n")
-dim_red <- DimReduction$new(data = splitter$data_train, labels = splitter$labels_train, verbose = TRUE)
-dim_red$run_pca()$plot_pca()
-dim_red$run_umap()$plot_umap()
+
+X_train <- splitter$data_train
+y_train <- splitter$labels_train
+
+pca_features <- c(
+  "AVG_SPEED", "DISTANCE", "CRS_ELAPSED_TIME",
+  "CRS_DEP_TIME_sin", "CRS_DEP_TIME_cos",
+  "CRS_ARR_TIME_sin", "CRS_ARR_TIME_cos"
+)
+
+umap_features <- c(
+  "AVG_SPEED", "DISTANCE", "CRS_ELAPSED_TIME",
+  "CRS_DEP_TIME_sin", "CRS_DEP_TIME_cos",
+  "CRS_ARR_TIME_sin", "CRS_ARR_TIME_cos",
+  "FL_MONTH", "FL_DAY_OF_WEEK", "SEASON",
+  "PEAK_MORNING", "PEAK_EVENING"
+)
+
+pca_features <- intersect(pca_features, names(X_train))
+umap_features <- intersect(umap_features, names(X_train))
+
+label_views <- list(Delay = y_train)
+
+if ("PEAK_MORNING" %in% names(X_train)) label_views[["Peak Morning"]] <- X_train$PEAK_MORNING
+if ("PEAK_EVENING" %in% names(X_train)) label_views[["Peak Evening"]] <- X_train$PEAK_EVENING
+if ("SEASON" %in% names(X_train))       label_views[["Season"]] <- X_train$SEASON
+if ("FL_MONTH" %in% names(X_train))     label_views[["Month"]] <- X_train$FL_MONTH
+if ("FL_DAY_OF_WEEK" %in% names(X_train)) label_views[["Day of Week"]] <- X_train$FL_DAY_OF_WEEK
+
+# --- PCA Loop ---
+for (label_name in names(label_views)) {
+  cat(sprintf("\n===== PCA (%s) =====\n", label_name))
+  labels <- label_views[[label_name]]
+
+  dim_red <- DimReduction$new(data = X_train, labels = labels, verbose = FALSE)
+  dim_red$run_pca(feature_cols = pca_features)
+
+  if (label_name == "Delay") {
+    dim_red$plot_pca(label_mode = "delay_categorical", export = FALSE)
+    dim_red$plot_pca(label_mode = "continuous", export = FALSE)
+  } else {
+    dim_red$plot_pca(label_mode = "generic_categorical", export = FALSE)
+  }
+}
+
+# --- UMAP Loop ---
+for (label_name in names(label_views)) {
+  cat(sprintf("\n===== UMAP (%s) =====\n", label_name))
+  labels <- label_views[[label_name]]
+
+  dim_red <- DimReduction$new(data = X_train, labels = labels, verbose = FALSE)
+  dim_red$run_umap(feature_cols = umap_features, max_samples = 100000)
+
+  if (label_name == "Delay") {
+    dim_red$plot_umap(label_mode = "delay_categorical", export = FALSE)
+    dim_red$plot_umap(label_mode = "continuous", export = FALSE)
+  } else {
+    dim_red$plot_umap(label_mode = "generic_categorical", export = FALSE)
+  }
+}
+
 cat("\n--- Finished PCA and UMAP ---\n")
 
 # 6. Hypotheses Testing
