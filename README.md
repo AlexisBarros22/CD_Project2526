@@ -150,6 +150,9 @@ saved_models/
 `MODEL_CARD.md` documents each model's hyperparameters, training subset,
 test-set metrics, and copy-paste loading code.
 
+In case these do not work, here is an alternate method to get these models:
+https://drive.google.com/file/d/15ac1LYpCqnZ4odBbnbZ5aFCGWqrYn9mc/view?usp=sharing
+
 ---
 
 ## Running the Project
